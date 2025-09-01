@@ -6,11 +6,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use chrono::Utc;
 
-#[derive(Debug, Clone)]
-enum AudioCommand {
-    StartRecording,
-    StopRecording,
-}
 
 struct AudioManager {
     recorder: AudioRecorder,
@@ -18,11 +13,7 @@ struct AudioManager {
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
-use winit::{
-    event_loop::{ControlFlow, EventLoop},
-    event::{Event, WindowEvent},
-};
+use std::io::{self, Write};
 
 #[derive(Debug, Deserialize)]
 struct TranscriptionResponse {
@@ -237,71 +228,33 @@ fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let transcription: TranscriptionResponse = response.json()?;
     println!("Transcription: {}", transcription.text);
 
-    Ok(())
+    std::process::exit(0);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new().map_err(|e| format!("Failed to create event loop: {}", e))?;
-    let hotkey_manager = GlobalHotKeyManager::new().map_err(|e| format!("Failed to create hotkey manager: {}", e))?;
-
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Period);
-    hotkey_manager.register(hotkey).map_err(|e| format!("Failed to register hotkey: {}", e))?;
-
     let mut audio_manager = AudioManager::new();
-    let (audio_tx, audio_rx) = flume::unbounded::<AudioCommand>();
 
-    println!("Press and hold Right Alt + . to record audio");
-
-    let result = event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Wait);
-
-        // Handle audio commands from channels
-        if let Ok(command) = audio_rx.try_recv() {
-            match command {
-                AudioCommand::StartRecording => {
-                    if let Err(e) = audio_manager.start_recording() {
-                        eprintln!("Failed to start recording: {}", e);
-                    }
-                }
-                AudioCommand::StopRecording => {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
-                }
-            }
-        }
-
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            match event.state {
-                HotKeyState::Pressed => {
-                    let tx = audio_tx.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = tx.send(AudioCommand::StartRecording) {
-                            eprintln!("Failed to send start command: {}", e);
-                        }
-                    });
-                }
-                HotKeyState::Released => {
-                    let tx = audio_tx.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = tx.send(AudioCommand::StopRecording) {
-                            eprintln!("Failed to send stop command: {}", e);
-                        }
-                    });
-                }
-            }
-        }
-
-        match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                elwt.exit();
-            }
-            _ => {}
-        }
-    });
-
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Event loop error: {}", e).into()),
+    println!("Recording started. Press Enter to stop and transcribe...");
+    
+    // Start recording immediately
+    if let Err(e) = audio_manager.start_recording() {
+        eprintln!("Failed to start recording: {}", e);
+        return Err(e.into());
     }
+
+    // Wait for Enter key
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    // Stop recording and process transcription
+    if let Err(e) = audio_manager.stop_recording() {
+        eprintln!("Failed to stop recording: {}", e);
+        return Err(e.into());
+    }
+
+    // Keep the main thread alive to allow transcription to complete
+    // The transcription function will exit the program when done
+    std::thread::park();
+
+    Ok(())
 }

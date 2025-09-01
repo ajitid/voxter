@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-This is a Rust project for speech-to-text functionality called "voxtral-speech-to-text". It's a desktop application that records audio via global hotkeys and transcribes it using Mistral's Voxtral API.
+This is a Rust project for speech-to-text functionality called "voxtral-speech-to-text". It's a desktop application that records audio via manual input and transcribes it using Mistral's Voxtral API.
 
 ## Development Commands
 
@@ -21,23 +21,24 @@ This is a Rust project for speech-to-text functionality called "voxtral-speech-t
 - The project uses Rust 2024 edition
 
 ## Architecture
-The application is structured around event-driven audio recording:
+The application is structured around manual audio recording triggered by user input:
 
 ### Core Components
 - `AudioManager` - Manages recording state and audio streams
 - `AudioRecorder` - Handles WAV file creation and audio data writing
-- Global hotkey system using `global-hotkey` crate (Alt + Period)
-- Event loop using `winit` for handling UI events and hotkey state
-- Channel-based communication between hotkey events and audio operations
+- Manual trigger system using stdin (press Enter to stop recording)
+- Channel-based communication between components using Arc<Mutex<T>>
 
 ### Audio Processing Flow
-1. Hotkey pressed → Start recording to timestamped WAV file
+1. Application starts → Automatically begins recording to timestamped WAV file
 2. Audio data captured via `cpal` and written using `hound`
-3. Hotkey released → Stop recording and trigger transcription
+3. User presses Enter → Stop recording and trigger transcription
 4. Background thread sends audio to Mistral API for transcription
 5. Audio file cleaned up after successful transcription
+6. Application exits after transcription completes
 
 ### External Dependencies
 - Requires `MISTRAL_API_KEY` environment variable for transcription
 - Uses Mistral's `voxtral-mini-latest` model
-- Audio format: 16-bit PCM WAV files
+- Audio format: 16-bit PCM WAV files with automatic device configuration
+- Uses `dotenvy` for loading environment variables from .env files
