@@ -1,10 +1,21 @@
-use reqwest::multipart;
+use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use chrono::Utc;
+
+#[derive(Debug, Clone)]
+enum AudioCommand {
+    StartRecording,
+    StopRecording,
+}
+
+struct AudioManager {
+    recorder: AudioRecorder,
+    current_stream: Option<cpal::Stream>,
+}
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use global_hotkey::{GlobalHotKeyManager, HotKeyState, hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent};
@@ -18,10 +29,20 @@ struct TranscriptionResponse {
     text: String,
 }
 
-#[derive(Clone)]
 struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
     current_file: Arc<Mutex<Option<String>>>,
+    writer: Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+}
+
+impl Clone for AudioRecorder {
+    fn clone(&self) -> Self {
+        Self {
+            recording: Arc::clone(&self.recording),
+            current_file: Arc::clone(&self.current_file),
+            writer: Arc::clone(&self.writer),
+        }
+    }
 }
 
 impl AudioRecorder {
@@ -29,24 +50,53 @@ impl AudioRecorder {
         Self {
             recording: Arc::new(Mutex::new(false)),
             current_file: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(None)),
         }
     }
 
-    async fn start_recording(&self) -> Result<(), String> {
-        let mut recording = self.recording.lock().await;
+    fn prepare_recording(&self) -> Result<String, String> {
+        let mut recording = self.recording.lock().unwrap();
         if *recording {
-            return Ok(());
+            return Err("Already recording".to_string());
         }
 
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let filename = format!("recording_{}.wav", timestamp);
         
-        let mut current_file = self.current_file.lock().await;
+        let mut current_file = self.current_file.lock().unwrap();
         *current_file = Some(filename.clone());
+
         *recording = true;
 
-        println!("Started recording: {}", filename);
+        Ok(filename)
+    }
 
+    fn finalize_recording(&self) -> Result<Option<String>, String> {
+        let mut recording = self.recording.lock().unwrap();
+        if !*recording {
+            return Ok(None);
+        }
+
+        *recording = false;
+
+        // Finalize and close the WAV writer
+        let mut writer_lock = self.writer.lock().unwrap();
+        if let Some(writer) = writer_lock.take() {
+            writer.finalize().map_err(|e| format!("Failed to finalize WAV file: {}", e))?;
+        }
+        drop(writer_lock);
+
+        let mut current_file = self.current_file.lock().unwrap();
+        let filename = current_file.take();
+
+        if let Some(ref file) = filename {
+            println!("Stopped recording: {}", file);
+        }
+
+        Ok(filename)
+    }
+
+    fn create_writer(&self, filename: &str) -> Result<(), String> {
         let host = cpal::default_host();
         let device = host.default_input_device()
             .ok_or("No input device available")?;
@@ -60,18 +110,57 @@ impl AudioRecorder {
             sample_format: hound::SampleFormat::Int,
         };
 
-        let writer = Arc::new(Mutex::new(hound::WavWriter::create(&filename, spec).map_err(|e| format!("Failed to create wav writer: {}", e))?));
-        let recording_clone = self.recording.clone();
+        let wav_writer = hound::WavWriter::create(filename, spec)
+            .map_err(|e| format!("Failed to create wav writer: {}", e))?;
+        
+        let mut writer_lock = self.writer.lock().unwrap();
+        *writer_lock = Some(wav_writer);
+
+        Ok(())
+    }
+
+    fn is_recording(&self) -> bool {
+        *self.recording.lock().unwrap()
+    }
+}
+
+impl AudioManager {
+    fn new() -> Self {
+        Self {
+            recorder: AudioRecorder::new(),
+            current_stream: None,
+        }
+    }
+
+    fn start_recording(&mut self) -> Result<(), String> {
+        if self.recorder.is_recording() {
+            return Ok(());
+        }
+
+        let filename = self.recorder.prepare_recording()?;
+        self.recorder.create_writer(&filename)?;
+
+        println!("Started recording: {}", filename);
+
+        let host = cpal::default_host();
+        let device = host.default_input_device()
+            .ok_or("No input device available")?;
+
+        let config = device.default_input_config().map_err(|e| format!("Failed to get input config: {}", e))?;
+        
+        let writer_arc = Arc::clone(&self.recorder.writer);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if let Ok(mut writer) = writer.try_lock() {
-                            for &sample in data {
-                                let sample_i16 = (sample * i16::MAX as f32) as i16;
-                                let _ = writer.write_sample(sample_i16);
+                        if let Ok(mut writer_opt) = writer_arc.try_lock() {
+                            if let Some(ref mut writer) = writer_opt.as_mut() {
+                                for &sample in data {
+                                    let sample_i16 = (sample * i16::MAX as f32) as i16;
+                                    let _ = writer.write_sample(sample_i16);
+                                }
                             }
                         }
                     },
@@ -83,38 +172,42 @@ impl AudioRecorder {
         };
 
         stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
-        
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if !*recording_clone.lock().await {
-                    break;
-                }
-            }
-        });
+        self.current_stream = Some(stream);
 
         Ok(())
     }
 
-    async fn stop_recording(&self) -> Result<Option<String>, String> {
-        let mut recording = self.recording.lock().await;
-        if !*recording {
-            return Ok(None);
+    fn stop_recording(&mut self) -> Result<(), String> {
+        if !self.recorder.is_recording() {
+            return Ok(());
         }
 
-        *recording = false;
-        let mut current_file = self.current_file.lock().await;
-        let filename = current_file.take();
+        // Stop the stream
+        self.current_stream.take();
 
-        if let Some(ref file) = filename {
-            println!("Stopped recording: {}", file);
+        // Finalize recording
+        match self.recorder.finalize_recording()? {
+            Some(filename) => {
+                // Process transcription in background thread
+                std::thread::spawn(move || {
+                    println!("Processing transcription...");
+                    if let Err(e) = transcribe_audio(&filename) {
+                        eprintln!("Failed to transcribe audio: {}", e);
+                    }
+                    // Clean up the audio file after transcription
+                    if let Err(e) = fs::remove_file(&filename) {
+                        eprintln!("Warning: Failed to remove audio file {}: {}", filename, e);
+                    }
+                });
+            }
+            None => {}
         }
 
-        Ok(filename)
+        Ok(())
     }
 }
 
-async fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     
     let api_key = env::var("MISTRAL_API_KEY")
@@ -123,7 +216,7 @@ async fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Err
     let audio_file = fs::read(file_path)
         .map_err(|e| format!("Failed to read audio file '{}': {}", file_path, e))?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::blocking::Client::new();
 
     let form = multipart::Form::new()
         .text("model", "voxtral-mini-latest")
@@ -139,51 +232,60 @@ async fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Err
         .post("https://api.mistral.ai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
-        .send()
-        .await?;
+        .send()?;
 
-    let transcription: TranscriptionResponse = response.json().await?;
+    let transcription: TranscriptionResponse = response.json()?;
     println!("Transcription: {}", transcription.text);
 
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new().map_err(|e| format!("Failed to create event loop: {}", e))?;
     let hotkey_manager = GlobalHotKeyManager::new().map_err(|e| format!("Failed to create hotkey manager: {}", e))?;
 
     let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Period);
     hotkey_manager.register(hotkey).map_err(|e| format!("Failed to register hotkey: {}", e))?;
 
-    let recorder = AudioRecorder::new();
+    let mut audio_manager = AudioManager::new();
+    let (audio_tx, audio_rx) = flume::unbounded::<AudioCommand>();
 
     println!("Press and hold Right Alt + . to record audio");
 
     let result = event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
 
+        // Handle audio commands from channels
+        if let Ok(command) = audio_rx.try_recv() {
+            match command {
+                AudioCommand::StartRecording => {
+                    if let Err(e) = audio_manager.start_recording() {
+                        eprintln!("Failed to start recording: {}", e);
+                    }
+                }
+                AudioCommand::StopRecording => {
+                    if let Err(e) = audio_manager.stop_recording() {
+                        eprintln!("Failed to stop recording: {}", e);
+                    }
+                }
+            }
+        }
+
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             match event.state {
                 HotKeyState::Pressed => {
-                    let recorder_clone = recorder.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = recorder_clone.start_recording().await {
-                            eprintln!("Failed to start recording: {}", e);
+                    let tx = audio_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = tx.send(AudioCommand::StartRecording) {
+                            eprintln!("Failed to send start command: {}", e);
                         }
                     });
                 }
                 HotKeyState::Released => {
-                    let recorder_clone = recorder.clone();
-                    tokio::spawn(async move {
-                        match recorder_clone.stop_recording().await {
-                            Ok(Some(filename)) => {
-                                if let Err(e) = transcribe_audio(&filename).await {
-                                    eprintln!("Failed to transcribe audio: {}", e);
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => eprintln!("Failed to stop recording: {}", e),
+                    let tx = audio_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = tx.send(AudioCommand::StopRecording) {
+                            eprintln!("Failed to send stop command: {}", e);
                         }
                     });
                 }
