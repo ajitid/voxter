@@ -10,6 +10,8 @@ struct TranscriptionResponse {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    
     let api_key = env::var("MISTRAL_API_KEY")
         .expect("MISTRAL_API_KEY environment variable must be set");
 
