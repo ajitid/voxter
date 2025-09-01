@@ -1,10 +1,8 @@
 use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
-use std::fs;
 use std::sync::Arc;
 use std::sync::Mutex;
-use chrono::Utc;
 
 
 struct AudioManager {
@@ -22,16 +20,18 @@ struct TranscriptionResponse {
 
 struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
-    current_file: Arc<Mutex<Option<String>>>,
-    writer: Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+    audio_buffer: Arc<Mutex<Vec<u8>>>,
+    sample_rate: u32,
+    channels: u16,
 }
 
 impl Clone for AudioRecorder {
     fn clone(&self) -> Self {
         Self {
             recording: Arc::clone(&self.recording),
-            current_file: Arc::clone(&self.current_file),
-            writer: Arc::clone(&self.writer),
+            audio_buffer: Arc::clone(&self.audio_buffer),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
         }
     }
 }
@@ -40,74 +40,101 @@ impl AudioRecorder {
     fn new() -> Self {
         Self {
             recording: Arc::new(Mutex::new(false)),
-            current_file: Arc::new(Mutex::new(None)),
-            writer: Arc::new(Mutex::new(None)),
+            audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            sample_rate: 44100,
+            channels: 1,
         }
     }
 
-    fn prepare_recording(&self) -> Result<String, String> {
+    fn create_wav_header(sample_rate: u32, channels: u16, data_size: u32) -> Vec<u8> {
+        let mut header = Vec::with_capacity(44);
+        
+        // RIFF header
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + data_size).to_le_bytes());
+        header.extend_from_slice(b"WAVE");
+        
+        // fmt chunk
+        header.extend_from_slice(b"fmt ");
+        header.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+        header.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+        header.extend_from_slice(&channels.to_le_bytes());
+        header.extend_from_slice(&sample_rate.to_le_bytes());
+        header.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes()); // byte rate
+        header.extend_from_slice(&(channels * 2).to_le_bytes()); // block align
+        header.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        
+        // data chunk header
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data_size.to_le_bytes());
+        
+        header
+    }
+
+    fn update_wav_header_size(buffer: &mut Vec<u8>, data_size: u32) {
+        if buffer.len() >= 44 {
+            // Update file size in RIFF header (bytes 4-7)
+            let file_size = (36 + data_size).to_le_bytes();
+            buffer[4..8].copy_from_slice(&file_size);
+            
+            // Update data size in data chunk header (bytes 40-43)
+            let data_size_bytes = data_size.to_le_bytes();
+            buffer[40..44].copy_from_slice(&data_size_bytes);
+        }
+    }
+
+    fn prepare_recording(&self) -> Result<(), String> {
         let mut recording = self.recording.lock().unwrap();
         if *recording {
             return Err("Already recording".to_string());
         }
 
-        let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("recording_{}.wav", timestamp);
-        
-        let mut current_file = self.current_file.lock().unwrap();
-        *current_file = Some(filename.clone());
+        // Initialize buffer with WAV header (placeholder for data size)
+        let mut buffer = self.audio_buffer.lock().unwrap();
+        buffer.clear();
+        let header = Self::create_wav_header(self.sample_rate, self.channels, 0);
+        buffer.extend_from_slice(&header);
 
         *recording = true;
-
-        Ok(filename)
+        Ok(())
     }
 
-    fn finalize_recording(&self) -> Result<Option<String>, String> {
+    fn finalize_recording(&self) -> Result<bool, String> {
         let mut recording = self.recording.lock().unwrap();
         if !*recording {
-            return Ok(None);
+            return Ok(false);
         }
 
         *recording = false;
 
-        // Finalize and close the WAV writer
-        let mut writer_lock = self.writer.lock().unwrap();
-        if let Some(writer) = writer_lock.take() {
-            writer.finalize().map_err(|e| format!("Failed to finalize WAV file: {}", e))?;
+        // Update WAV header with actual data size
+        let mut buffer = self.audio_buffer.lock().unwrap();
+        if buffer.len() > 44 {
+            let data_size = (buffer.len() - 44) as u32;
+            Self::update_wav_header_size(&mut buffer, data_size);
+            println!("Stopped recording: {} bytes of audio data", data_size);
+            Ok(true)
+        } else {
+            println!("No audio data recorded");
+            Ok(false)
         }
-        drop(writer_lock);
-
-        let mut current_file = self.current_file.lock().unwrap();
-        let filename = current_file.take();
-
-        if let Some(ref file) = filename {
-            println!("Stopped recording: {}", file);
-        }
-
-        Ok(filename)
     }
 
-    fn create_writer(&self, filename: &str) -> Result<(), String> {
+    fn configure_from_device(&mut self) -> Result<(), String> {
         let host = cpal::default_host();
         let device = host.default_input_device()
             .ok_or("No input device available")?;
 
         let config = device.default_input_config().map_err(|e| format!("Failed to get input config: {}", e))?;
         
-        let spec = hound::WavSpec {
-            channels: config.channels(),
-            sample_rate: config.sample_rate().0,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let wav_writer = hound::WavWriter::create(filename, spec)
-            .map_err(|e| format!("Failed to create wav writer: {}", e))?;
+        self.sample_rate = config.sample_rate().0;
+        self.channels = config.channels();
         
-        let mut writer_lock = self.writer.lock().unwrap();
-        *writer_lock = Some(wav_writer);
-
         Ok(())
+    }
+
+    fn get_audio_buffer(&self) -> Vec<u8> {
+        self.audio_buffer.lock().unwrap().clone()
     }
 
     fn is_recording(&self) -> bool {
@@ -128,10 +155,10 @@ impl AudioManager {
             return Ok(());
         }
 
-        let filename = self.recorder.prepare_recording()?;
-        self.recorder.create_writer(&filename)?;
+        self.recorder.configure_from_device()?;
+        self.recorder.prepare_recording()?;
 
-        println!("Started recording: {}", filename);
+        println!("Started recording ({}Hz, {} channels)", self.recorder.sample_rate, self.recorder.channels);
 
         let host = cpal::default_host();
         let device = host.default_input_device()
@@ -139,19 +166,17 @@ impl AudioManager {
 
         let config = device.default_input_config().map_err(|e| format!("Failed to get input config: {}", e))?;
         
-        let writer_arc = Arc::clone(&self.recorder.writer);
+        let buffer_arc = Arc::clone(&self.recorder.audio_buffer);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if let Ok(mut writer_opt) = writer_arc.try_lock() {
-                            if let Some(ref mut writer) = writer_opt.as_mut() {
-                                for &sample in data {
-                                    let sample_i16 = (sample * i16::MAX as f32) as i16;
-                                    let _ = writer.write_sample(sample_i16);
-                                }
+                        if let Ok(mut buffer) = buffer_arc.try_lock() {
+                            for &sample in data {
+                                let sample_i16 = (sample * i16::MAX as f32) as i16;
+                                buffer.extend_from_slice(&sample_i16.to_le_bytes());
                             }
                         }
                     },
@@ -177,35 +202,26 @@ impl AudioManager {
         self.current_stream.take();
 
         // Finalize recording
-        match self.recorder.finalize_recording()? {
-            Some(filename) => {
-                // Process transcription in background thread
-                std::thread::spawn(move || {
-                    println!("Processing transcription...");
-                    if let Err(e) = transcribe_audio(&filename) {
-                        eprintln!("Failed to transcribe audio: {}", e);
-                    }
-                    // Clean up the audio file after transcription
-                    if let Err(e) = fs::remove_file(&filename) {
-                        eprintln!("Warning: Failed to remove audio file {}: {}", filename, e);
-                    }
-                });
-            }
-            None => {}
+        if self.recorder.finalize_recording()? {
+            let audio_data = self.recorder.get_audio_buffer();
+            // Process transcription in background thread
+            std::thread::spawn(move || {
+                println!("Processing transcription...");
+                if let Err(e) = transcribe_audio(audio_data) {
+                    eprintln!("Failed to transcribe audio: {}", e);
+                }
+            });
         }
 
         Ok(())
     }
 }
 
-fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn transcribe_audio(audio_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     
     let api_key = env::var("MISTRAL_API_KEY")
         .expect("MISTRAL_API_KEY environment variable must be set");
-
-    let audio_file = fs::read(file_path)
-        .map_err(|e| format!("Failed to read audio file '{}': {}", file_path, e))?;
 
     let client = reqwest::blocking::Client::new();
 
@@ -214,7 +230,7 @@ fn transcribe_audio(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .text("language", "en")
         .part(
             "file",
-            multipart::Part::bytes(audio_file)
+            multipart::Part::bytes(audio_data)
                 .file_name("audio.wav")
                 .mime_str("audio/wav")?,
         );
