@@ -418,7 +418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!("Hold Right Alt + Space to record. Release to transcribe.");
+    println!("Hold Right Alt (AltGr) to record. Release to transcribe.");
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
@@ -428,12 +428,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
 
-    // Track key states
+    // Track Right Alt state only
     let right_alt_down = Arc::new(Mutex::new(false));
-    let space_down = Arc::new(Mutex::new(false));
 
     let a1 = Arc::clone(&right_alt_down);
-    let s1 = Arc::clone(&space_down);
     let tx1 = ctrl_tx.clone();
 
     // rdev listens on a blocking loop; run it in a thread
@@ -442,58 +440,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             use rdev::{EventType, Key};
 
             let mut alt_changed = false;
-            let mut space_changed = false;
 
             match event.event_type {
                 EventType::KeyPress(key) => {
                     match key {
-                        // On Windows, Right Alt often reports as AltGr. Some layouts report Alt.
-                        Key::AltGr | Key::Alt => {
+                        // Only trigger on Right Alt (AltGr)
+                        Key::AltGr => {
                             if let Ok(mut alt) = a1.lock() {
                                 if !*alt {
                                     *alt = true;
                                     alt_changed = true;
                                 }
                             }
+                            if alt_changed {
+                                let _ = tx1.send(ControlMsg::Start);
+                            }
                         }
-                        Key::Space => {
-                            if let Ok(mut sp) = s1.lock() {
-                                if !*sp {
-                                    *sp = true;
-                                    space_changed = true;
+                        _ => {}
+                    }
+                }
+                EventType::KeyRelease(key) => {
+                    match key {
+                        // Only stop on AltGr release
+                        Key::AltGr => {
+                            if let Ok(mut alt) = a1.lock() {
+                                if *alt {
+                                    *alt = false;
+                                    // On Alt release, stop recording
+                                    let _ = tx1.send(ControlMsg::Stop);
                                 }
                             }
                         }
                         _ => {}
                     }
-
-                    // If both keys are held, start recording (idempotent)
-                    let both_down = {
-                        let alt = *a1.lock().unwrap();
-                        let sp = *s1.lock().unwrap();
-                        alt && sp
-                    };
-                    if both_down && (alt_changed || space_changed) {
-                        let _ = tx1.send(ControlMsg::Start);
-                    }
-                }
-                EventType::KeyRelease(key) => {
-                    match key {
-                        Key::AltGr | Key::Alt => {
-                            if let Ok(mut alt) = a1.lock() {
-                                *alt = false;
-                            }
-                        }
-                        Key::Space => {
-                            if let Ok(mut sp) = s1.lock() {
-                                *sp = false;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    // If either key released and we were recording, stop
-                    let _ = tx1.send(ControlMsg::Stop);
                 }
                 _ => {}
             }
