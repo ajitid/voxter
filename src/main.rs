@@ -453,8 +453,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     enum ControlMsg {
         Start,
         Stop,
+        Quit,
     }
     let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
+
+    // Ctrl+C handler: request graceful shutdown
+    {
+        let tx = ctrl_tx.clone();
+        ctrlc::set_handler(move || {
+            let _ = tx.send(ControlMsg::Quit);
+        })
+        .expect("failed to set Ctrl+C handler");
+    }
 
     // Track Right Alt state only
     let right_alt_down = Arc::new(Mutex::new(false));
@@ -527,6 +537,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("Failed to stop recording: {}", e);
                     }
                 }
+            }
+            Ok(ControlMsg::Quit) => {
+                // Gracefully stop if recording, then exit
+                if audio_manager.recorder.is_recording() {
+                    if let Err(e) = audio_manager.stop_recording() {
+                        eprintln!("Failed to stop recording: {}", e);
+                    }
+                }
+                break;
             }
             Err(_) => break,
         }
