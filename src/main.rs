@@ -1,7 +1,9 @@
 use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
-use std::fs::File;
+// use std::fs::File;
+// use std::io::Write;
+use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -12,7 +14,6 @@ struct AudioManager {
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::io::{self, Write};
 
 #[derive(Debug, Deserialize)]
 struct TranscriptionResponse {
@@ -353,17 +354,21 @@ impl AudioManager {
             let recorder_clone = self.recorder.clone();
             // Process transcription in background thread
             std::thread::spawn(move || {
+                /*
                 // Generate timestamp for consistent file naming
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
+                */
 
                 // Save the original WAV file first
                 let wav_data = recorder_clone.get_audio_buffer();
+                /*
                 if let Err(e) = save_wav_file(&wav_data, timestamp) {
                     eprintln!("Failed to save WAV file: {}", e);
                 }
+                */
 
                 println!("Converting to Opus format...");
                 let conversion_start = Instant::now();
@@ -382,10 +387,12 @@ impl AudioManager {
                             opus_data.len() / 1024
                         );
 
+                        /*
                         // Save the Opus file
                         if let Err(e) = save_opus_file(&opus_data, timestamp) {
                             eprintln!("Failed to save Opus file: {}", e);
                         }
+                        */
 
                         println!("Processing transcription...");
                         if let Err(e) = transcribe_audio_opus(opus_data) {
@@ -403,6 +410,7 @@ impl AudioManager {
     }
 }
 
+/*
 fn save_wav_file(wav_data: &[u8], timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
     let filename = format!("recording_{}.wav", timestamp);
     let mut file = File::create(&filename)?;
@@ -420,6 +428,7 @@ fn save_opus_file(opus_data: &[u8], timestamp: u64) -> Result<String, Box<dyn st
     println!("Saved Opus audio to: {}", filename);
     Ok(filename)
 }
+*/
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
