@@ -154,11 +154,25 @@ impl AudioRecorder {
         // Extract PCM data (skip WAV header)
         let pcm_data = &buffer[44..];
 
-        // Convert bytes back to i16 samples
-        let samples: Vec<i16> = pcm_data
+        // Convert bytes back to i16 samples (interleaved if channels > 1)
+        let raw_samples: Vec<i16> = pcm_data
             .chunks_exact(2)
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
+
+        // Downmix to mono if needed to match Opus encoder settings
+        let mono_samples: Vec<i16> = if self.channels > 1 {
+            let ch = self.channels as usize;
+            raw_samples
+                .chunks_exact(ch)
+                .map(|frame| {
+                    let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                    (sum / ch as i32) as i16
+                })
+                .collect()
+        } else {
+            raw_samples
+        };
 
         // Configure Opus encoder for speech
         let mut encoder = opus::Encoder::new(
@@ -176,25 +190,33 @@ impl AudioRecorder {
         // Create Ogg container for Opus data
         let mut ogg_data = Vec::new();
         let mut writer = ogg::PacketWriter::new(&mut ogg_data);
-        let serial_number = 12345;
-        
+        // Use a per-file serial number (simple time-based mix to avoid collisions)
+        let serial_number: u32 = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            ^ 0xA5A5_5A5A_F00D_F00D) as u32;
+
         // Create Opus identification header
         let mut opus_head = Vec::new();
         opus_head.extend_from_slice(b"OpusHead");
         opus_head.push(1); // version
-        opus_head.push(self.channels as u8); // channel count
+        // We encode mono to keep things simple and robust
+        opus_head.push(1u8); // channel count
         opus_head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
         opus_head.extend_from_slice(&self.sample_rate.to_le_bytes()); // original sample rate
         opus_head.extend_from_slice(&0u16.to_le_bytes()); // output gain
         opus_head.push(0); // channel mapping family
 
-        // Write identification header as first page
-        writer.write_packet(
-            opus_head,
-            serial_number,
-            ogg::PacketWriteEndInfo::EndStream,
-            0
-        ).map_err(|e| format!("Failed to write Opus header: {}", e))?;
+        // Write identification header as first page (separate page, gp=0)
+        writer
+            .write_packet(
+                opus_head,
+                serial_number,
+                ogg::PacketWriteEndInfo::EndPage,
+                0u64,
+            )
+            .map_err(|e| format!("Failed to write Opus header: {}", e))?;
 
         // Create Opus comment header
         let mut opus_tags = Vec::new();
@@ -204,22 +226,27 @@ impl AudioRecorder {
         opus_tags.extend_from_slice(vendor);
         opus_tags.extend_from_slice(&0u32.to_le_bytes()); // user comment list length
 
-        // Write comment header as second page
-        writer.write_packet(
-            opus_tags,
-            serial_number,
-            ogg::PacketWriteEndInfo::EndStream,
-            1
-        ).map_err(|e| format!("Failed to write Opus comments: {}", e))?;
+        // Write comment header as second page (separate page, gp=0)
+        writer
+            .write_packet(
+                opus_tags,
+                serial_number,
+                ogg::PacketWriteEndInfo::EndPage,
+                0u64,
+            )
+            .map_err(|e| format!("Failed to write Opus comments: {}", e))?;
 
         // Encode audio in chunks (Opus works with fixed frame sizes)
-        const FRAME_SIZE: usize = 960; // 60ms at 16kHz
+        // Choose 20ms frames based on current sample rate
+        let frame_size: usize = (self.sample_rate as usize) / 50; // 20ms
         let mut output_buffer = [0u8; 4000]; // Max Opus packet size
-        let mut page_sequence = 2;
+        // Track absolute granule position in 48kHz decoded samples
+        let mut granulepos: u64 = 0;
+        let total_frames = (mono_samples.len() + frame_size - 1) / frame_size;
 
-        for chunk in samples.chunks(FRAME_SIZE) {
+        for (frame_index, chunk) in mono_samples.chunks(frame_size).enumerate() {
             // Pad the last chunk if necessary
-            let mut frame = [0i16; FRAME_SIZE];
+            let mut frame = vec![0i16; frame_size];
             for (i, &sample) in chunk.iter().enumerate() {
                 frame[i] = sample;
             }
@@ -227,14 +254,21 @@ impl AudioRecorder {
             match encoder.encode(&frame, &mut output_buffer) {
                 Ok(len) => {
                     let packet_data = output_buffer[..len].to_vec();
-                    writer.write_packet(
-                        packet_data,
-                        serial_number,
-                        ogg::PacketWriteEndInfo::EndStream,
-                        page_sequence
-                    ).map_err(|e| format!("Failed to write Opus packet: {}", e))?;
-                    page_sequence += 1;
-                },
+                    // Advance granule position by the decoded duration at 48kHz
+                    granulepos = granulepos.saturating_add(
+                        (frame_size as u64) * 48_000u64 / (self.sample_rate as u64),
+                    );
+
+                    let end_info = if frame_index + 1 == total_frames {
+                        ogg::PacketWriteEndInfo::EndStream
+                    } else {
+                        ogg::PacketWriteEndInfo::NormalPacket
+                    };
+
+                    writer
+                        .write_packet(packet_data, serial_number, end_info, granulepos as u64)
+                        .map_err(|e| format!("Failed to write Opus packet: {}", e))?;
+                }
                 Err(e) => return Err(format!("Opus encoding error: {}", e)),
             }
         }
@@ -332,8 +366,14 @@ impl AudioManager {
                 }
 
                 println!("Converting to Opus format...");
+                let conversion_start = Instant::now();
                 match recorder_clone.convert_to_opus() {
                     Ok(opus_data) => {
+                        let conversion_latency = conversion_start.elapsed();
+                        println!(
+                            "Opus Conversion Time: {:.2}ms",
+                            conversion_latency.as_millis()
+                        );
                         let original_size = wav_data.len();
                         println!(
                             "Compression: {:.1}% ({}KB → {}KB)",
