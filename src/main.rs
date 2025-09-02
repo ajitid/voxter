@@ -8,6 +8,42 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
 
+fn play_sound<P: AsRef<std::path::Path>>(path: P) {
+    let path_buf = path.as_ref().to_path_buf();
+    thread::spawn(move || {
+        use rodio::stream::OutputStreamBuilder;
+
+        let mut stream_handle = match OutputStreamBuilder::open_default_stream() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("Failed to open default output stream: {}", e);
+                return;
+            }
+        };
+        // Optional: avoid noisy drop log in release; keep during dev if needed
+        stream_handle.log_on_drop(false);
+
+        let mixer = stream_handle.mixer();
+        let sink = rodio::Sink::connect_new(mixer);
+
+        match std::fs::File::open(&path_buf) {
+            Ok(file) => {
+                let source = std::io::BufReader::new(file);
+                match rodio::Decoder::new(source) {
+                    Ok(decoder) => {
+                        sink.append(decoder);
+                        // Block this thread until sound completes to keep stream alive
+                        sink.sleep_until_end();
+                    }
+                    Err(e) => eprintln!("Failed to decode sound {}: {}", path_buf.display(), e),
+                }
+            }
+            Err(e) => eprintln!("Failed to open sound {}: {}", path_buf.display(), e),
+        }
+        // Dropping stream_handle here stops the mixer; after playback finished.
+    });
+}
+
 struct AudioManager {
     recorder: AudioRecorder,
     current_stream: Option<cpal::Stream>,
@@ -123,6 +159,8 @@ impl AudioManager {
         self.recorder.configure_from_device()?;
         self.recorder.prepare_recording()?;
 
+        play_sound("assets/on.mp3");
+
         println!(
             "Started recording ({}Hz, {} channels)",
             self.recorder.sample_rate, self.recorder.channels
@@ -156,14 +194,14 @@ impl AudioManager {
                                     acc += data[base + c];
                                 }
                                 let avg = acc / (channels_cfg as f32);
-                                let clamped = avg.max(-1.0).min(1.0);
+                                let clamped = avg.clamp(-1.0, 1.0);
                                 mono.push((clamped * (i16::MAX as f32)) as i16);
                             }
                             mono
                         } else {
                             let mut mono = Vec::with_capacity(data.len());
                             for &s in data {
-                                let clamped = s.max(-1.0).min(1.0);
+                                let clamped = s.clamp(-1.0, 1.0);
                                 mono.push((clamped * (i16::MAX as f32)) as i16);
                             }
                             mono
@@ -199,6 +237,7 @@ impl AudioManager {
 
         // Finalize recording
         if self.recorder.finalize_recording()? {
+            play_sound("assets/off.mp3");
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
                 guard.take();
@@ -480,36 +519,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut alt_changed = false;
 
             match event.event_type {
-                EventType::KeyPress(key) => {
-                    match key {
-                        // Only trigger on Right Alt (AltGr)
-                        Key::AltGr => {
-                            if let Ok(mut alt) = a1.lock() {
-                                if !*alt {
-                                    *alt = true;
-                                    alt_changed = true;
-                                }
-                            }
-                            if alt_changed {
-                                let _ = tx1.send(ControlMsg::Start);
-                            }
+                // Only trigger on Right Alt (AltGr)
+                EventType::KeyPress(Key::AltGr) => {
+                    if let Ok(mut alt) = a1.lock() {
+                        if !*alt {
+                            *alt = true;
+                            alt_changed = true;
                         }
-                        _ => {}
+                    }
+                    if alt_changed {
+                        let _ = tx1.send(ControlMsg::Start);
                     }
                 }
-                EventType::KeyRelease(key) => {
-                    match key {
-                        // Only stop on AltGr release
-                        Key::AltGr => {
-                            if let Ok(mut alt) = a1.lock() {
-                                if *alt {
-                                    *alt = false;
-                                    // On Alt release, stop recording
-                                    let _ = tx1.send(ControlMsg::Stop);
-                                }
-                            }
+                // Only stop on AltGr release
+                EventType::KeyRelease(Key::AltGr) => {
+                    if let Ok(mut alt) = a1.lock() {
+                        if *alt {
+                            *alt = false;
+                            // On Alt release, stop recording
+                            let _ = tx1.send(ControlMsg::Stop);
                         }
-                        _ => {}
                     }
                 }
                 _ => {}
