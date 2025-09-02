@@ -11,7 +11,9 @@ use std::time::Instant;
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
     thread::spawn(move || {
+        use rodio::Source;
         use rodio::stream::OutputStreamBuilder;
+        use std::time::Duration;
 
         let mut stream_handle = match OutputStreamBuilder::open_default_stream() {
             Ok(h) => h,
@@ -31,6 +33,11 @@ fn play_sound<P: AsRef<std::path::Path>>(path: P) {
                 let source = std::io::BufReader::new(file);
                 match rodio::Decoder::new(source) {
                     Ok(decoder) => {
+                        // Prepend silence to avoid cut-in at playback start
+                        let silence = rodio::source::SineWave::new(440.0)
+                            .take_duration(Duration::from_millis(100))
+                            .amplify(0.0);
+                        sink.append(silence);
                         sink.append(decoder);
                         // Block this thread until sound completes to keep stream alive
                         sink.sleep_until_end();
