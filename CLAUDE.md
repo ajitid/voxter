@@ -33,13 +33,16 @@ The application is structured around manual audio recording triggered by user in
 1. Application starts → Automatically begins recording with custom WAV header creation
 2. Audio data captured via `cpal` with f32 to i16 PCM conversion
 3. User presses Enter → Stop recording and trigger transcription
-4. Background thread sends audio directly to Mistral API (no file persistence)
-5. API response time measured and displayed
-6. Application exits after transcription completes
+4. Background thread converts audio to Opus format for better compression
+5. Both WAV and Opus files are saved locally with timestamp filenames
+6. Opus audio sent to Mistral API for transcription
+7. API response time measured and displayed
+8. Application exits after transcription completes
 
 ### External Dependencies
 - Requires `MISTRAL_API_KEY` environment variable for transcription
 - Uses Mistral's `voxtral-mini-latest` model
 - Audio format: 16-bit PCM WAV files with automatic device configuration
+- Opus encoding for compressed audio transmission to API
 - Uses `dotenvy` for loading environment variables from .env files
 - API response time measurement included for performance monitoring

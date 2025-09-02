@@ -1,6 +1,7 @@
 use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
+use std::fs::File;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -152,7 +153,7 @@ impl AudioRecorder {
 
         // Extract PCM data (skip WAV header)
         let pcm_data = &buffer[44..];
-        
+
         // Convert bytes back to i16 samples
         let samples: Vec<i16> = pcm_data
             .chunks_exact(2)
@@ -160,17 +161,61 @@ impl AudioRecorder {
             .collect();
 
         // Configure Opus encoder for speech
-        let mut encoder = opus::Encoder::new(self.sample_rate, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
+        let mut encoder = opus::Encoder::new(
+            self.sample_rate,
+            opus::Channels::Mono,
+            opus::Application::Voip,
+        )
+        .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
 
         // Set bitrate for speech (24 kbps is good for speech quality)
-        encoder.set_bitrate(opus::Bitrate::Bits(24000))
+        encoder
+            .set_bitrate(opus::Bitrate::Bits(24000))
             .map_err(|e| format!("Failed to set bitrate: {}", e))?;
+
+        // Create Ogg container for Opus data
+        let mut ogg_data = Vec::new();
+        let mut writer = ogg::PacketWriter::new(&mut ogg_data);
+        let serial_number = 12345;
+        
+        // Create Opus identification header
+        let mut opus_head = Vec::new();
+        opus_head.extend_from_slice(b"OpusHead");
+        opus_head.push(1); // version
+        opus_head.push(self.channels as u8); // channel count
+        opus_head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
+        opus_head.extend_from_slice(&self.sample_rate.to_le_bytes()); // original sample rate
+        opus_head.extend_from_slice(&0u16.to_le_bytes()); // output gain
+        opus_head.push(0); // channel mapping family
+
+        // Write identification header as first page
+        writer.write_packet(
+            opus_head,
+            serial_number,
+            ogg::PacketWriteEndInfo::EndStream,
+            0
+        ).map_err(|e| format!("Failed to write Opus header: {}", e))?;
+
+        // Create Opus comment header
+        let mut opus_tags = Vec::new();
+        opus_tags.extend_from_slice(b"OpusTags");
+        let vendor = b"voxtral-speech-to-text";
+        opus_tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        opus_tags.extend_from_slice(vendor);
+        opus_tags.extend_from_slice(&0u32.to_le_bytes()); // user comment list length
+
+        // Write comment header as second page
+        writer.write_packet(
+            opus_tags,
+            serial_number,
+            ogg::PacketWriteEndInfo::EndStream,
+            1
+        ).map_err(|e| format!("Failed to write Opus comments: {}", e))?;
 
         // Encode audio in chunks (Opus works with fixed frame sizes)
         const FRAME_SIZE: usize = 960; // 60ms at 16kHz
-        let mut opus_data = Vec::new();
         let mut output_buffer = [0u8; 4000]; // Max Opus packet size
+        let mut page_sequence = 2;
 
         for chunk in samples.chunks(FRAME_SIZE) {
             // Pad the last chunk if necessary
@@ -180,12 +225,21 @@ impl AudioRecorder {
             }
 
             match encoder.encode(&frame, &mut output_buffer) {
-                Ok(len) => opus_data.extend_from_slice(&output_buffer[..len]),
+                Ok(len) => {
+                    let packet_data = output_buffer[..len].to_vec();
+                    writer.write_packet(
+                        packet_data,
+                        serial_number,
+                        ogg::PacketWriteEndInfo::EndStream,
+                        page_sequence
+                    ).map_err(|e| format!("Failed to write Opus packet: {}", e))?;
+                    page_sequence += 1;
+                },
                 Err(e) => return Err(format!("Opus encoding error: {}", e)),
             }
         }
 
-        Ok(opus_data)
+        Ok(ogg_data)
     }
 
     fn is_recording(&self) -> bool {
@@ -265,16 +319,34 @@ impl AudioManager {
             let recorder_clone = self.recorder.clone();
             // Process transcription in background thread
             std::thread::spawn(move || {
+                // Generate timestamp for consistent file naming
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                // Save the original WAV file first
+                let wav_data = recorder_clone.get_audio_buffer();
+                if let Err(e) = save_wav_file(&wav_data, timestamp) {
+                    eprintln!("Failed to save WAV file: {}", e);
+                }
+
                 println!("Converting to Opus format...");
                 match recorder_clone.convert_to_opus() {
                     Ok(opus_data) => {
-                        let original_size = recorder_clone.get_audio_buffer().len();
+                        let original_size = wav_data.len();
                         println!(
                             "Compression: {:.1}% ({}KB → {}KB)",
                             100.0 - (opus_data.len() as f64 / original_size as f64 * 100.0),
                             original_size / 1024,
                             opus_data.len() / 1024
                         );
+
+                        // Save the Opus file
+                        if let Err(e) = save_opus_file(&opus_data, timestamp) {
+                            eprintln!("Failed to save Opus file: {}", e);
+                        }
+
                         println!("Processing transcription...");
                         if let Err(e) = transcribe_audio_opus(opus_data) {
                             eprintln!("Failed to transcribe audio: {}", e);
@@ -289,6 +361,24 @@ impl AudioManager {
 
         Ok(())
     }
+}
+
+fn save_wav_file(wav_data: &[u8], timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
+    let filename = format!("recording_{}.wav", timestamp);
+    let mut file = File::create(&filename)?;
+    file.write_all(wav_data)?;
+
+    println!("Saved WAV audio to: {}", filename);
+    Ok(filename)
+}
+
+fn save_opus_file(opus_data: &[u8], timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
+    let filename = format!("recording_{}.opus", timestamp);
+    let mut file = File::create(&filename)?;
+    file.write_all(opus_data)?;
+
+    println!("Saved Opus audio to: {}", filename);
+    Ok(filename)
 }
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
