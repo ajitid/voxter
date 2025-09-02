@@ -288,7 +288,7 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     println!("API Response Time: {:.2}ms", api_latency.as_millis());
     println!("Transcription: {}", transcription.text);
 
-    std::process::exit(0);
+    Ok(())
 }
 
 fn run_opus_worker(
