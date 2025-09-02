@@ -51,8 +51,6 @@ impl AudioRecorder {
         }
     }
 
-    // WAV buffer helpers removed; streaming Opus is used instead.
-
     fn prepare_recording(&self) -> Result<(), String> {
         let mut recording = self.recording.lock().unwrap();
         if *recording {
@@ -103,8 +101,6 @@ impl AudioRecorder {
 
         Ok(())
     }
-
-    // Removed WAV buffer and on-stop conversion. Streaming Opus is used instead.
 
     fn is_recording(&self) -> bool {
         *self.recording.lock().unwrap()
@@ -315,8 +311,11 @@ fn type_transcript(text: &str) {
 
 fn try_type(text: &str) -> Result<(), String> {
     use enigo::{Enigo, Keyboard, Settings};
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
-    enigo.text(text).map_err(|e| format!("Enigo text error: {e}"))?;
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
+    enigo
+        .text(text)
+        .map_err(|e| format!("Enigo text error: {e}"))?;
     Ok(())
 }
 
@@ -464,7 +463,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx1 = ctrl_tx.clone();
 
     // rdev listens on a blocking loop; run it in a thread
-    let listener_handle = thread::spawn(move || {
+    thread::spawn(move || {
         let callback = move |event: rdev::Event| {
             use rdev::{EventType, Key};
 
