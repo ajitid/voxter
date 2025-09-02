@@ -314,10 +314,9 @@ fn type_transcript(text: &str) {
 }
 
 fn try_type(text: &str) -> Result<(), String> {
-    use enigo::{Enigo, KeyboardControllable};
-    let mut enigo = Enigo::new();
-    // key_sequence escapes are handled by Enigo; send raw text.
-    enigo.key_sequence(text);
+    use enigo::{Enigo, Keyboard, Settings};
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
+    enigo.text(text).map_err(|e| format!("Enigo text error: {e}"))?;
     Ok(())
 }
 
