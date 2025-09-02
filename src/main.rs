@@ -2,10 +2,10 @@ use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
 use std::fs::File;
-use std::io;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
 use std::time::Instant;
 
 struct AudioManager {
@@ -415,29 +415,115 @@ fn run_opus_worker(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!("Recording started. Press Enter to stop and transcribe...");
+    println!("Hold Right Alt + Space to record. Release to transcribe.");
+    println!("Waiting for hotkey...");
 
-    // Start recording immediately
-    if let Err(e) = audio_manager.start_recording() {
-        eprintln!("Failed to start recording: {}", e);
-        return Err(e.into());
+    // Control channel from hotkey listener -> main thread
+    enum ControlMsg {
+        Start,
+        Stop,
     }
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
 
-    // Wait for Enter key
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    // Track key states
+    let right_alt_down = Arc::new(Mutex::new(false));
+    let space_down = Arc::new(Mutex::new(false));
 
-    // Stop recording and process transcription
-    if let Err(e) = audio_manager.stop_recording() {
-        eprintln!("Failed to stop recording: {}", e);
-        return Err(e.into());
+    let a1 = Arc::clone(&right_alt_down);
+    let s1 = Arc::clone(&space_down);
+    let tx1 = ctrl_tx.clone();
+
+    // rdev listens on a blocking loop; run it in a thread
+    let listener_handle = thread::spawn(move || {
+        let callback = move |event: rdev::Event| {
+            use rdev::{EventType, Key};
+
+            let mut alt_changed = false;
+            let mut space_changed = false;
+
+            match event.event_type {
+                EventType::KeyPress(key) => {
+                    match key {
+                        // On Windows, Right Alt often reports as AltGr. Some layouts report Alt.
+                        Key::AltGr | Key::Alt => {
+                            if let Ok(mut alt) = a1.lock() {
+                                if !*alt {
+                                    *alt = true;
+                                    alt_changed = true;
+                                }
+                            }
+                        }
+                        Key::Space => {
+                            if let Ok(mut sp) = s1.lock() {
+                                if !*sp {
+                                    *sp = true;
+                                    space_changed = true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // If both keys are held, start recording (idempotent)
+                    let both_down = {
+                        let alt = *a1.lock().unwrap();
+                        let sp = *s1.lock().unwrap();
+                        alt && sp
+                    };
+                    if both_down && (alt_changed || space_changed) {
+                        let _ = tx1.send(ControlMsg::Start);
+                    }
+                }
+                EventType::KeyRelease(key) => {
+                    match key {
+                        Key::AltGr | Key::Alt => {
+                            if let Ok(mut alt) = a1.lock() {
+                                *alt = false;
+                            }
+                        }
+                        Key::Space => {
+                            if let Ok(mut sp) = s1.lock() {
+                                *sp = false;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // If either key released and we were recording, stop
+                    let _ = tx1.send(ControlMsg::Stop);
+                }
+                _ => {}
+            }
+        };
+
+        if let Err(e) = rdev::listen(callback) {
+            eprintln!("Global hotkey listener error: {:?}", e);
+        }
+    });
+
+    // Main thread: handle control messages and operate the audio manager
+    loop {
+        match ctrl_rx.recv() {
+            Ok(ControlMsg::Start) => {
+                if !audio_manager.recorder.is_recording() {
+                    if let Err(e) = audio_manager.start_recording() {
+                        eprintln!("Failed to start recording: {}", e);
+                    }
+                }
+            }
+            Ok(ControlMsg::Stop) => {
+                if audio_manager.recorder.is_recording() {
+                    if let Err(e) = audio_manager.stop_recording() {
+                        eprintln!("Failed to stop recording: {}", e);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
     }
-
-    // Keep the main thread alive to allow transcription to complete
-    // The transcription function will exit the program when done
-    std::thread::park();
 
     Ok(())
 }
