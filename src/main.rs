@@ -41,7 +41,7 @@ impl AudioRecorder {
         Self {
             recording: Arc::new(Mutex::new(false)),
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
-            sample_rate: 44100,
+            sample_rate: 16000,
             channels: 1,
         }
     }
@@ -144,6 +144,50 @@ impl AudioRecorder {
         self.audio_buffer.lock().unwrap().clone()
     }
 
+    fn convert_to_opus(&self) -> Result<Vec<u8>, String> {
+        let buffer = self.audio_buffer.lock().unwrap();
+        if buffer.len() <= 44 {
+            return Err("No audio data to convert".to_string());
+        }
+
+        // Extract PCM data (skip WAV header)
+        let pcm_data = &buffer[44..];
+        
+        // Convert bytes back to i16 samples
+        let samples: Vec<i16> = pcm_data
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        // Configure Opus encoder for speech
+        let mut encoder = opus::Encoder::new(self.sample_rate, opus::Channels::Mono, opus::Application::Voip)
+            .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
+
+        // Set bitrate for speech (24 kbps is good for speech quality)
+        encoder.set_bitrate(opus::Bitrate::Bits(24000))
+            .map_err(|e| format!("Failed to set bitrate: {}", e))?;
+
+        // Encode audio in chunks (Opus works with fixed frame sizes)
+        const FRAME_SIZE: usize = 960; // 60ms at 16kHz
+        let mut opus_data = Vec::new();
+        let mut output_buffer = [0u8; 4000]; // Max Opus packet size
+
+        for chunk in samples.chunks(FRAME_SIZE) {
+            // Pad the last chunk if necessary
+            let mut frame = [0i16; FRAME_SIZE];
+            for (i, &sample) in chunk.iter().enumerate() {
+                frame[i] = sample;
+            }
+
+            match encoder.encode(&frame, &mut output_buffer) {
+                Ok(len) => opus_data.extend_from_slice(&output_buffer[..len]),
+                Err(e) => return Err(format!("Opus encoding error: {}", e)),
+            }
+        }
+
+        Ok(opus_data)
+    }
+
     fn is_recording(&self) -> bool {
         *self.recording.lock().unwrap()
     }
@@ -218,12 +262,27 @@ impl AudioManager {
 
         // Finalize recording
         if self.recorder.finalize_recording()? {
-            let audio_data = self.recorder.get_audio_buffer();
+            let recorder_clone = self.recorder.clone();
             // Process transcription in background thread
             std::thread::spawn(move || {
-                println!("Processing transcription...");
-                if let Err(e) = transcribe_audio(audio_data) {
-                    eprintln!("Failed to transcribe audio: {}", e);
+                println!("Converting to Opus format...");
+                match recorder_clone.convert_to_opus() {
+                    Ok(opus_data) => {
+                        let original_size = recorder_clone.get_audio_buffer().len();
+                        println!(
+                            "Compression: {:.1}% ({}KB → {}KB)",
+                            100.0 - (opus_data.len() as f64 / original_size as f64 * 100.0),
+                            original_size / 1024,
+                            opus_data.len() / 1024
+                        );
+                        println!("Processing transcription...");
+                        if let Err(e) = transcribe_audio_opus(opus_data) {
+                            eprintln!("Failed to transcribe audio: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to convert to Opus: {}", e);
+                    }
                 }
             });
         }
@@ -232,7 +291,7 @@ impl AudioManager {
     }
 }
 
-fn transcribe_audio(audio_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let api_key =
@@ -245,12 +304,12 @@ fn transcribe_audio(audio_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error
         .text("language", "en")
         .part(
             "file",
-            multipart::Part::bytes(audio_data)
-                .file_name("audio.wav")
-                .mime_str("audio/wav")?,
+            multipart::Part::bytes(opus_data)
+                .file_name("audio.opus")
+                .mime_str("audio/opus")?,
         );
 
-    println!("Sending audio to Mistral API...");
+    println!("Sending Opus audio to Mistral API...");
     let start_time = Instant::now();
 
     let response = client
