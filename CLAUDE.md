@@ -30,11 +30,11 @@ The application is structured around manual audio recording triggered by user in
 - Channel-based communication between components using Arc<Mutex<T>>
 
 ### Audio Processing Flow
-1. Application starts → Automatically begins recording to timestamped WAV file
-2. Audio data captured via `cpal` and written using `hound`
+1. Application starts → Automatically begins recording with custom WAV header creation
+2. Audio data captured via `cpal` with f32 to i16 PCM conversion
 3. User presses Enter → Stop recording and trigger transcription
-4. Background thread sends audio to Mistral API for transcription
-5. Audio file cleaned up after successful transcription
+4. Background thread sends audio directly to Mistral API (no file persistence)
+5. API response time measured and displayed
 6. Application exits after transcription completes
 
 ### External Dependencies
@@ -42,3 +42,4 @@ The application is structured around manual audio recording triggered by user in
 - Uses Mistral's `voxtral-mini-latest` model
 - Audio format: 16-bit PCM WAV files with automatic device configuration
 - Uses `dotenvy` for loading environment variables from .env files
+- API response time measurement included for performance monitoring

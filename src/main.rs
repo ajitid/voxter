@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
-
+use std::time::Instant;
 
 struct AudioManager {
     recorder: AudioRecorder,
@@ -48,12 +48,12 @@ impl AudioRecorder {
 
     fn create_wav_header(sample_rate: u32, channels: u16, data_size: u32) -> Vec<u8> {
         let mut header = Vec::with_capacity(44);
-        
+
         // RIFF header
         header.extend_from_slice(b"RIFF");
         header.extend_from_slice(&(36 + data_size).to_le_bytes());
         header.extend_from_slice(b"WAVE");
-        
+
         // fmt chunk
         header.extend_from_slice(b"fmt ");
         header.extend_from_slice(&16u32.to_le_bytes()); // chunk size
@@ -63,11 +63,11 @@ impl AudioRecorder {
         header.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes()); // byte rate
         header.extend_from_slice(&(channels * 2).to_le_bytes()); // block align
         header.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-        
+
         // data chunk header
         header.extend_from_slice(b"data");
         header.extend_from_slice(&data_size.to_le_bytes());
-        
+
         header
     }
 
@@ -76,7 +76,7 @@ impl AudioRecorder {
             // Update file size in RIFF header (bytes 4-7)
             let file_size = (36 + data_size).to_le_bytes();
             buffer[4..8].copy_from_slice(&file_size);
-            
+
             // Update data size in data chunk header (bytes 40-43)
             let data_size_bytes = data_size.to_le_bytes();
             buffer[40..44].copy_from_slice(&data_size_bytes);
@@ -112,7 +112,11 @@ impl AudioRecorder {
         if buffer.len() > 44 {
             let data_size = (buffer.len() - 44) as u32;
             Self::update_wav_header_size(&mut buffer, data_size);
-            println!("Stopped recording: {} bytes of audio data", data_size);
+            // The modification converts bytes to megabytes by dividing by 1,048,576 (1024²)
+            println!(
+                "Stopped recording: {:.2} MB of audio data",
+                data_size as f64 / 1_048_576.0
+            );
             Ok(true)
         } else {
             println!("No audio data recorded");
@@ -122,14 +126,17 @@ impl AudioRecorder {
 
     fn configure_from_device(&mut self) -> Result<(), String> {
         let host = cpal::default_host();
-        let device = host.default_input_device()
+        let device = host
+            .default_input_device()
             .ok_or("No input device available")?;
 
-        let config = device.default_input_config().map_err(|e| format!("Failed to get input config: {}", e))?;
-        
+        let config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get input config: {}", e))?;
+
         self.sample_rate = config.sample_rate().0;
         self.channels = config.channels();
-        
+
         Ok(())
     }
 
@@ -158,19 +165,25 @@ impl AudioManager {
         self.recorder.configure_from_device()?;
         self.recorder.prepare_recording()?;
 
-        println!("Started recording ({}Hz, {} channels)", self.recorder.sample_rate, self.recorder.channels);
+        println!(
+            "Started recording ({}Hz, {} channels)",
+            self.recorder.sample_rate, self.recorder.channels
+        );
 
         let host = cpal::default_host();
-        let device = host.default_input_device()
+        let device = host
+            .default_input_device()
             .ok_or("No input device available")?;
 
-        let config = device.default_input_config().map_err(|e| format!("Failed to get input config: {}", e))?;
-        
+        let config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get input config: {}", e))?;
+
         let buffer_arc = Arc::clone(&self.recorder.audio_buffer);
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                device.build_input_stream(
+            cpal::SampleFormat::F32 => device
+                .build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if let Ok(mut buffer) = buffer_arc.try_lock() {
@@ -182,12 +195,14 @@ impl AudioManager {
                     },
                     |err| eprintln!("Audio stream error: {}", err),
                     None,
-                ).map_err(|e| format!("Failed to build input stream: {}", e))?
-            }
+                )
+                .map_err(|e| format!("Failed to build input stream: {}", e))?,
             _ => return Err("Unsupported sample format".into()),
         };
 
-        stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start stream: {}", e))?;
         self.current_stream = Some(stream);
 
         Ok(())
@@ -219,9 +234,9 @@ impl AudioManager {
 
 fn transcribe_audio(audio_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    
-    let api_key = env::var("MISTRAL_API_KEY")
-        .expect("MISTRAL_API_KEY environment variable must be set");
+
+    let api_key =
+        env::var("MISTRAL_API_KEY").expect("MISTRAL_API_KEY environment variable must be set");
 
     let client = reqwest::blocking::Client::new();
 
@@ -235,13 +250,19 @@ fn transcribe_audio(audio_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error
                 .mime_str("audio/wav")?,
         );
 
+    println!("Sending audio to Mistral API...");
+    let start_time = Instant::now();
+
     let response = client
         .post("https://api.mistral.ai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
         .send()?;
 
+    let api_latency = start_time.elapsed();
     let transcription: TranscriptionResponse = response.json()?;
+
+    println!("API Response Time: {:.2}ms", api_latency.as_millis());
     println!("Transcription: {}", transcription.text);
 
     std::process::exit(0);
@@ -251,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut audio_manager = AudioManager::new();
 
     println!("Recording started. Press Enter to stop and transcribe...");
-    
+
     // Start recording immediately
     if let Err(e) = audio_manager.start_recording() {
         eprintln!("Failed to start recording: {}", e);
