@@ -288,6 +288,36 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     println!("API Response Time: {:.2}ms", api_latency.as_millis());
     println!("Transcription: {}", transcription.text);
 
+    // Type the transcript into the active window
+    type_transcript(&transcription.text);
+
+    Ok(())
+}
+
+fn type_transcript(text: &str) {
+    // Best effort: avoid panics; just log errors.
+    // Enigo types into the currently focused window.
+    // Add a trailing space to separate entries.
+    let to_type = if text.ends_with(['.', '!', '?', ':', ';']) {
+        format!("{} ", text)
+    } else {
+        text.to_string()
+    };
+
+    // Typing can take time; run in a detached thread so we don't block.
+    let s = to_type;
+    std::thread::spawn(move || {
+        if let Err(e) = try_type(&s) {
+            eprintln!("Typing error: {}", e);
+        }
+    });
+}
+
+fn try_type(text: &str) -> Result<(), String> {
+    use enigo::{Enigo, KeyboardControllable};
+    let mut enigo = Enigo::new();
+    // key_sequence escapes are handled by Enigo; send raw text.
+    enigo.key_sequence(text);
     Ok(())
 }
 
