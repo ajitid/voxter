@@ -1,9 +1,9 @@
 use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
-// use std::fs::File;
-// use std::io::Write;
+use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -22,18 +22,20 @@ struct TranscriptionResponse {
 
 struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
-    audio_buffer: Arc<Mutex<Vec<u8>>>,
     sample_rate: u32,
     channels: u16,
+    tx: Arc<Mutex<Option<flume::Sender<Vec<i16>>>>>,
+    result_rx: Arc<Mutex<Option<flume::Receiver<Vec<u8>>>>>,
 }
 
 impl Clone for AudioRecorder {
     fn clone(&self) -> Self {
         Self {
             recording: Arc::clone(&self.recording),
-            audio_buffer: Arc::clone(&self.audio_buffer),
             sample_rate: self.sample_rate,
             channels: self.channels,
+            tx: Arc::clone(&self.tx),
+            result_rx: Arc::clone(&self.result_rx),
         }
     }
 }
@@ -42,48 +44,14 @@ impl AudioRecorder {
     fn new() -> Self {
         Self {
             recording: Arc::new(Mutex::new(false)),
-            audio_buffer: Arc::new(Mutex::new(Vec::new())),
             sample_rate: 16000,
             channels: 1,
+            tx: Arc::new(Mutex::new(None)),
+            result_rx: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn create_wav_header(sample_rate: u32, channels: u16, data_size: u32) -> Vec<u8> {
-        let mut header = Vec::with_capacity(44);
-
-        // RIFF header
-        header.extend_from_slice(b"RIFF");
-        header.extend_from_slice(&(36 + data_size).to_le_bytes());
-        header.extend_from_slice(b"WAVE");
-
-        // fmt chunk
-        header.extend_from_slice(b"fmt ");
-        header.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-        header.extend_from_slice(&1u16.to_le_bytes()); // PCM format
-        header.extend_from_slice(&channels.to_le_bytes());
-        header.extend_from_slice(&sample_rate.to_le_bytes());
-        header.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes()); // byte rate
-        header.extend_from_slice(&(channels * 2).to_le_bytes()); // block align
-        header.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-
-        // data chunk header
-        header.extend_from_slice(b"data");
-        header.extend_from_slice(&data_size.to_le_bytes());
-
-        header
-    }
-
-    fn update_wav_header_size(buffer: &mut Vec<u8>, data_size: u32) {
-        if buffer.len() >= 44 {
-            // Update file size in RIFF header (bytes 4-7)
-            let file_size = (36 + data_size).to_le_bytes();
-            buffer[4..8].copy_from_slice(&file_size);
-
-            // Update data size in data chunk header (bytes 40-43)
-            let data_size_bytes = data_size.to_le_bytes();
-            buffer[40..44].copy_from_slice(&data_size_bytes);
-        }
-    }
+    // WAV buffer helpers removed; streaming Opus is used instead.
 
     fn prepare_recording(&self) -> Result<(), String> {
         let mut recording = self.recording.lock().unwrap();
@@ -91,11 +59,19 @@ impl AudioRecorder {
             return Err("Already recording".to_string());
         }
 
-        // Initialize buffer with WAV header (placeholder for data size)
-        let mut buffer = self.audio_buffer.lock().unwrap();
-        buffer.clear();
-        let header = Self::create_wav_header(self.sample_rate, self.channels, 0);
-        buffer.extend_from_slice(&header);
+        // Initialize streaming Opus worker and channels
+        let (tx, rx) = flume::bounded::<Vec<i16>>(8);
+        let (result_tx, result_rx) = flume::bounded::<Vec<u8>>(1);
+
+        *self.tx.lock().unwrap() = Some(tx);
+        *self.result_rx.lock().unwrap() = Some(result_rx);
+
+        let sr = self.sample_rate;
+        std::thread::spawn(move || {
+            if let Err(e) = run_opus_worker(rx, result_tx, sr) {
+                eprintln!("Opus worker error: {}", e);
+            }
+        });
 
         *recording = true;
         Ok(())
@@ -109,21 +85,7 @@ impl AudioRecorder {
 
         *recording = false;
 
-        // Update WAV header with actual data size
-        let mut buffer = self.audio_buffer.lock().unwrap();
-        if buffer.len() > 44 {
-            let data_size = (buffer.len() - 44) as u32;
-            Self::update_wav_header_size(&mut buffer, data_size);
-            // The modification converts bytes to megabytes by dividing by 1,048,576 (1024²)
-            println!(
-                "Stopped recording: {:.2} MB of audio data",
-                data_size as f64 / 1_048_576.0
-            );
-            Ok(true)
-        } else {
-            println!("No audio data recorded");
-            Ok(false)
-        }
+        Ok(true)
     }
 
     fn configure_from_device(&mut self) -> Result<(), String> {
@@ -142,140 +104,7 @@ impl AudioRecorder {
         Ok(())
     }
 
-    fn get_audio_buffer(&self) -> Vec<u8> {
-        self.audio_buffer.lock().unwrap().clone()
-    }
-
-    fn convert_to_opus(&self) -> Result<Vec<u8>, String> {
-        let buffer = self.audio_buffer.lock().unwrap();
-        if buffer.len() <= 44 {
-            return Err("No audio data to convert".to_string());
-        }
-
-        // Extract PCM data (skip WAV header)
-        let pcm_data = &buffer[44..];
-
-        // Convert bytes back to i16 samples (interleaved if channels > 1)
-        let raw_samples: Vec<i16> = pcm_data
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
-
-        // Downmix to mono if needed to match Opus encoder settings
-        let mono_samples: Vec<i16> = if self.channels > 1 {
-            let ch = self.channels as usize;
-            raw_samples
-                .chunks_exact(ch)
-                .map(|frame| {
-                    let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                    (sum / ch as i32) as i16
-                })
-                .collect()
-        } else {
-            raw_samples
-        };
-
-        // Configure Opus encoder for speech
-        let mut encoder = opus::Encoder::new(
-            self.sample_rate,
-            opus::Channels::Mono,
-            opus::Application::Voip,
-        )
-        .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
-
-        // Set bitrate for speech (24 kbps is good for speech quality)
-        encoder
-            .set_bitrate(opus::Bitrate::Bits(24000))
-            .map_err(|e| format!("Failed to set bitrate: {}", e))?;
-
-        // Create Ogg container for Opus data
-        let mut ogg_data = Vec::new();
-        let mut writer = ogg::PacketWriter::new(&mut ogg_data);
-        // Use a per-file serial number (simple time-based mix to avoid collisions)
-        let serial_number: u32 = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-            ^ 0xA5A5_5A5A_F00D_F00D) as u32;
-
-        // Create Opus identification header
-        let mut opus_head = Vec::new();
-        opus_head.extend_from_slice(b"OpusHead");
-        opus_head.push(1); // version
-        // We encode mono to keep things simple and robust
-        opus_head.push(1u8); // channel count
-        opus_head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
-        opus_head.extend_from_slice(&self.sample_rate.to_le_bytes()); // original sample rate
-        opus_head.extend_from_slice(&0u16.to_le_bytes()); // output gain
-        opus_head.push(0); // channel mapping family
-
-        // Write identification header as first page (separate page, gp=0)
-        writer
-            .write_packet(
-                opus_head,
-                serial_number,
-                ogg::PacketWriteEndInfo::EndPage,
-                0u64,
-            )
-            .map_err(|e| format!("Failed to write Opus header: {}", e))?;
-
-        // Create Opus comment header
-        let mut opus_tags = Vec::new();
-        opus_tags.extend_from_slice(b"OpusTags");
-        let vendor = b"voxtral-speech-to-text";
-        opus_tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
-        opus_tags.extend_from_slice(vendor);
-        opus_tags.extend_from_slice(&0u32.to_le_bytes()); // user comment list length
-
-        // Write comment header as second page (separate page, gp=0)
-        writer
-            .write_packet(
-                opus_tags,
-                serial_number,
-                ogg::PacketWriteEndInfo::EndPage,
-                0u64,
-            )
-            .map_err(|e| format!("Failed to write Opus comments: {}", e))?;
-
-        // Encode audio in chunks (Opus works with fixed frame sizes)
-        // Choose 20ms frames based on current sample rate
-        let frame_size: usize = (self.sample_rate as usize) / 50; // 20ms
-        let mut output_buffer = [0u8; 4000]; // Max Opus packet size
-        // Track absolute granule position in 48kHz decoded samples
-        let mut granulepos: u64 = 0;
-        let total_frames = (mono_samples.len() + frame_size - 1) / frame_size;
-
-        for (frame_index, chunk) in mono_samples.chunks(frame_size).enumerate() {
-            // Pad the last chunk if necessary
-            let mut frame = vec![0i16; frame_size];
-            for (i, &sample) in chunk.iter().enumerate() {
-                frame[i] = sample;
-            }
-
-            match encoder.encode(&frame, &mut output_buffer) {
-                Ok(len) => {
-                    let packet_data = output_buffer[..len].to_vec();
-                    // Advance granule position by the decoded duration at 48kHz
-                    granulepos = granulepos.saturating_add(
-                        (frame_size as u64) * 48_000u64 / (self.sample_rate as u64),
-                    );
-
-                    let end_info = if frame_index + 1 == total_frames {
-                        ogg::PacketWriteEndInfo::EndStream
-                    } else {
-                        ogg::PacketWriteEndInfo::NormalPacket
-                    };
-
-                    writer
-                        .write_packet(packet_data, serial_number, end_info, granulepos as u64)
-                        .map_err(|e| format!("Failed to write Opus packet: {}", e))?;
-                }
-                Err(e) => return Err(format!("Opus encoding error: {}", e)),
-            }
-        }
-
-        Ok(ogg_data)
-    }
+    // Removed WAV buffer and on-stop conversion. Streaming Opus is used instead.
 
     fn is_recording(&self) -> bool {
         *self.recording.lock().unwrap()
@@ -312,17 +141,40 @@ impl AudioManager {
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-        let buffer_arc = Arc::clone(&self.recorder.audio_buffer);
+        let tx_arc = Arc::clone(&self.recorder.tx);
 
+        let channels_cfg = config.channels() as usize;
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device
                 .build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if let Ok(mut buffer) = buffer_arc.try_lock() {
-                            for &sample in data {
-                                let sample_i16 = (sample * i16::MAX as f32) as i16;
-                                buffer.extend_from_slice(&sample_i16.to_le_bytes());
+                        // Downmix to mono if needed and convert to i16
+                        let chunk: Vec<i16> = if channels_cfg > 1 {
+                            let frames = data.len() / channels_cfg;
+                            let mut mono = Vec::with_capacity(frames);
+                            for i in 0..frames {
+                                let mut acc = 0.0f32;
+                                let base = i * channels_cfg;
+                                for c in 0..channels_cfg {
+                                    acc += data[base + c];
+                                }
+                                let avg = acc / (channels_cfg as f32);
+                                let clamped = avg.max(-1.0).min(1.0);
+                                mono.push((clamped * (i16::MAX as f32)) as i16);
+                            }
+                            mono
+                        } else {
+                            let mut mono = Vec::with_capacity(data.len());
+                            for &s in data {
+                                let clamped = s.max(-1.0).min(1.0);
+                                mono.push((clamped * (i16::MAX as f32)) as i16);
+                            }
+                            mono
+                        };
+                        if let Ok(guard) = tx_arc.lock() {
+                            if let Some(tx) = &*guard {
+                                let _ = tx.try_send(chunk);
                             }
                         }
                     },
@@ -351,57 +203,39 @@ impl AudioManager {
 
         // Finalize recording
         if self.recorder.finalize_recording()? {
-            let recorder_clone = self.recorder.clone();
-            // Process transcription in background thread
+            // Close the sender to signal worker end-of-stream
+            if let Ok(mut guard) = self.recorder.tx.lock() {
+                guard.take();
+            }
+            let result_rx_arc = Arc::clone(&self.recorder.result_rx);
             std::thread::spawn(move || {
-                /*
-                // Generate timestamp for consistent file naming
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                */
-
-                // Save the original WAV file first
-                let wav_data = recorder_clone.get_audio_buffer();
-                /*
-                if let Err(e) = save_wav_file(&wav_data, timestamp) {
-                    eprintln!("Failed to save WAV file: {}", e);
-                }
-                */
-
-                println!("Converting to Opus format...");
-                let conversion_start = Instant::now();
-                match recorder_clone.convert_to_opus() {
-                    Ok(opus_data) => {
-                        let conversion_latency = conversion_start.elapsed();
-                        println!(
-                            "Opus Conversion Time: {:.2}ms",
-                            conversion_latency.as_millis()
-                        );
-                        let original_size = wav_data.len();
-                        println!(
-                            "Compression: {:.1}% ({}KB → {}KB)",
-                            100.0 - (opus_data.len() as f64 / original_size as f64 * 100.0),
-                            original_size / 1024,
-                            opus_data.len() / 1024
-                        );
-
-                        /*
-                        // Save the Opus file
-                        if let Err(e) = save_opus_file(&opus_data, timestamp) {
-                            eprintln!("Failed to save Opus file: {}", e);
-                        }
-                        */
-
-                        println!("Processing transcription...");
-                        if let Err(e) = transcribe_audio_opus(opus_data) {
-                            eprintln!("Failed to transcribe audio: {}", e);
+                println!("Finalizing Opus stream...");
+                let start = Instant::now();
+                let opus_data = {
+                    let mut guard = result_rx_arc.lock().unwrap();
+                    match guard.take().unwrap().recv() {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("Failed to receive Opus data: {}", e);
+                            Vec::new()
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to convert to Opus: {}", e);
+                };
+                let dt = start.elapsed();
+                println!("Opus finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
+                if !opus_data.is_empty() {
+                    /*
+                    // Save Opus to file before transcription
+                    if let Err(e) = save_opus_file(&opus_data) {
+                        eprintln!("Failed to save Opus file: {}", e);
                     }
+                    */
+                    println!("Processing transcription...");
+                    if let Err(e) = transcribe_audio_opus(opus_data) {
+                        eprintln!("Failed to transcribe audio: {}", e);
+                    }
+                } else {
+                    eprintln!("No Opus data produced");
                 }
             });
         }
@@ -410,25 +244,16 @@ impl AudioManager {
     }
 }
 
-/*
-fn save_wav_file(wav_data: &[u8], timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
-    let filename = format!("recording_{}.wav", timestamp);
-    let mut file = File::create(&filename)?;
-    file.write_all(wav_data)?;
-
-    println!("Saved WAV audio to: {}", filename);
-    Ok(filename)
-}
-
-fn save_opus_file(opus_data: &[u8], timestamp: u64) -> Result<String, Box<dyn std::error::Error>> {
-    let filename = format!("recording_{}.opus", timestamp);
+fn _save_opus_file(opus_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let filename = format!("recording_{}.opus", ts);
     let mut file = File::create(&filename)?;
     file.write_all(opus_data)?;
-
     println!("Saved Opus audio to: {}", filename);
     Ok(filename)
 }
-*/
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
@@ -464,6 +289,129 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     println!("Transcription: {}", transcription.text);
 
     std::process::exit(0);
+}
+
+fn run_opus_worker(
+    rx: flume::Receiver<Vec<i16>>,
+    result_tx: flume::Sender<Vec<u8>>,
+    sample_rate: u32,
+) -> Result<(), String> {
+    // Configure Opus encoder for mono speech
+    let mut encoder =
+        opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Voip)
+            .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
+    encoder
+        .set_bitrate(opus::Bitrate::Bits(24000))
+        .map_err(|e| format!("Failed to set bitrate: {}", e))?;
+
+    // Prepare Ogg container
+    let mut ogg_data = Vec::new();
+    let mut writer = ogg::PacketWriter::new(&mut ogg_data);
+    let serial_number: u32 = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+        ^ 0xA5A5_5A5A_F00D_F00D) as u32;
+
+    // Identification header
+    let mut opus_head = Vec::new();
+    opus_head.extend_from_slice(b"OpusHead");
+    opus_head.push(1);
+    opus_head.push(1u8); // mono
+    opus_head.extend_from_slice(&0u16.to_le_bytes());
+    opus_head.extend_from_slice(&sample_rate.to_le_bytes());
+    opus_head.extend_from_slice(&0u16.to_le_bytes());
+    opus_head.push(0);
+    writer
+        .write_packet(
+            opus_head,
+            serial_number,
+            ogg::PacketWriteEndInfo::EndPage,
+            0u64,
+        )
+        .map_err(|e| format!("Failed to write Opus header: {}", e))?;
+
+    // Comment header
+    let mut opus_tags = Vec::new();
+    opus_tags.extend_from_slice(b"OpusTags");
+    let vendor = b"voxtral-speech-to-text";
+    opus_tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    opus_tags.extend_from_slice(vendor);
+    opus_tags.extend_from_slice(&0u32.to_le_bytes());
+    writer
+        .write_packet(
+            opus_tags,
+            serial_number,
+            ogg::PacketWriteEndInfo::EndPage,
+            0u64,
+        )
+        .map_err(|e| format!("Failed to write Opus comments: {}", e))?;
+
+    // Stream frames
+    let frame_size: usize = (sample_rate as usize) / 50; // 20ms frames
+    let mut out_buf = [0u8; 4000];
+    let mut granulepos: u64 = 0;
+    let mut accum: Vec<i16> = Vec::with_capacity(frame_size * 2);
+    while let Ok(mut chunk) = rx.recv() {
+        accum.append(&mut chunk);
+        while accum.len() >= frame_size {
+            let frame: Vec<i16> = accum.drain(..frame_size).collect();
+            match encoder.encode(&frame, &mut out_buf) {
+                Ok(len) => {
+                    let packet = out_buf[..len].to_vec();
+                    granulepos = granulepos
+                        .saturating_add((frame_size as u64) * 48_000u64 / (sample_rate as u64));
+                    writer
+                        .write_packet(
+                            packet,
+                            serial_number,
+                            ogg::PacketWriteEndInfo::NormalPacket,
+                            granulepos,
+                        )
+                        .map_err(|e| format!("Failed to write Opus packet: {}", e))?;
+                }
+                Err(e) => return Err(format!("Opus encoding error: {}", e)),
+            }
+        }
+    }
+
+    // Flush remaining samples (pad to full frame)
+    if !accum.is_empty() {
+        let mut frame = vec![0i16; frame_size];
+        for (i, &s) in accum.iter().enumerate() {
+            if i < frame_size {
+                frame[i] = s;
+            } else {
+                break;
+            }
+        }
+        if let Ok(len) = encoder.encode(&frame, &mut out_buf) {
+            let packet = out_buf[..len].to_vec();
+            granulepos =
+                granulepos.saturating_add((frame_size as u64) * 48_000u64 / (sample_rate as u64));
+            writer
+                .write_packet(
+                    packet,
+                    serial_number,
+                    ogg::PacketWriteEndInfo::NormalPacket,
+                    granulepos,
+                )
+                .map_err(|e| format!("Failed to write Opus packet: {}", e))?;
+        }
+    }
+
+    // End stream
+    writer
+        .write_packet(
+            Vec::new(),
+            serial_number,
+            ogg::PacketWriteEndInfo::EndStream,
+            granulepos,
+        )
+        .map_err(|e| format!("Failed to finalize Opus stream: {}", e))?;
+
+    let _ = result_tx.send(ogg_data);
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
