@@ -492,7 +492,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!("Hold Right Alt (AltGr) to record. Release to transcribe.");
+    println!(
+        "Hold Right Alt (AltGr) or Right Command to record. Release to transcribe."
+    );
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
@@ -512,10 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("failed to set Ctrl+C handler");
     }
 
-    // Track Right Alt state only
-    let right_alt_down = Arc::new(Mutex::new(false));
-
-    let a1 = Arc::clone(&right_alt_down);
+    // Hotkey control channel
     let tx1 = ctrl_tx.clone();
 
     // rdev listens on a blocking loop; run it in a thread
@@ -523,30 +522,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let callback = move |event: rdev::Event| {
             use rdev::{EventType, Key};
 
-            let mut alt_changed = false;
-
             match event.event_type {
-                // Only trigger on Right Alt (AltGr)
-                EventType::KeyPress(Key::AltGr) => {
-                    if let Ok(mut alt) = a1.lock() {
-                        if !*alt {
-                            *alt = true;
-                            alt_changed = true;
-                        }
-                    }
-                    if alt_changed {
-                        let _ = tx1.send(ControlMsg::Start);
-                    }
+                // Start recording when either key is pressed
+                EventType::KeyPress(Key::AltGr) | EventType::KeyPress(Key::MetaRight) => {
+                    let _ = tx1.send(ControlMsg::Start);
                 }
-                // Only stop on AltGr release
-                EventType::KeyRelease(Key::AltGr) => {
-                    if let Ok(mut alt) = a1.lock() {
-                        if *alt {
-                            *alt = false;
-                            // On Alt release, stop recording
-                            let _ = tx1.send(ControlMsg::Stop);
-                        }
-                    }
+                // Stop recording when either key is released
+                EventType::KeyRelease(Key::AltGr) | EventType::KeyRelease(Key::MetaRight) => {
+                    let _ = tx1.send(ControlMsg::Stop);
                 }
                 _ => {}
             }
