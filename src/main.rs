@@ -255,8 +255,6 @@ impl AudioManager {
 
         // Finalize recording
         if self.recorder.finalize_recording()? {
-            play_sound("assets/off.mp3");
-            
             // Skip processing if recording is too short
             if duration < 0.9 {
                 println!("Recording too short ({:.2}s), skipping transcription", duration);
@@ -273,6 +271,8 @@ impl AudioManager {
                 });
                 return Ok(());
             }
+            
+            play_sound("assets/off.mp3");
             
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
