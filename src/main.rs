@@ -69,6 +69,7 @@ struct AudioRecorder {
     channels: u16,
     tx: Arc<Mutex<Option<flume::Sender<Vec<i16>>>>>,
     result_rx: Arc<Mutex<Option<flume::Receiver<Vec<u8>>>>>,
+    start_time: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Clone for AudioRecorder {
@@ -79,6 +80,7 @@ impl Clone for AudioRecorder {
             channels: self.channels,
             tx: Arc::clone(&self.tx),
             result_rx: Arc::clone(&self.result_rx),
+            start_time: Arc::clone(&self.start_time),
         }
     }
 }
@@ -91,6 +93,7 @@ impl AudioRecorder {
             channels: 1,
             tx: Arc::new(Mutex::new(None)),
             result_rx: Arc::new(Mutex::new(None)),
+            start_time: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -114,6 +117,7 @@ impl AudioRecorder {
             }
         });
 
+        *self.start_time.lock().unwrap() = Some(Instant::now());
         *recording = true;
         Ok(())
     }
@@ -242,9 +246,34 @@ impl AudioManager {
         // Stop the stream
         self.current_stream.take();
 
+        // Check recording duration before processing
+        let duration = if let Some(start_time) = *self.recorder.start_time.lock().unwrap() {
+            start_time.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+
         // Finalize recording
         if self.recorder.finalize_recording()? {
             play_sound("assets/off.mp3");
+            
+            // Skip processing if recording is too short
+            if duration < 0.9 {
+                println!("Recording too short ({:.2}s), skipping transcription", duration);
+                // Still need to consume the Opus data to clean up the worker
+                if let Ok(mut guard) = self.recorder.tx.lock() {
+                    guard.take();
+                }
+                let result_rx_arc = Arc::clone(&self.recorder.result_rx);
+                std::thread::spawn(move || {
+                    let mut guard = result_rx_arc.lock().unwrap();
+                    if let Some(rx) = guard.take() {
+                        let _ = rx.recv(); // Consume and discard
+                    }
+                });
+                return Ok(());
+            }
+            
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
                 guard.take();
