@@ -1,5 +1,4 @@
-use reqwest::blocking::multipart;
-use serde::Deserialize;
+use base64::Engine;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -57,11 +56,6 @@ struct AudioManager {
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
-#[derive(Debug, Deserialize)]
-struct TranscriptionResponse {
-    text: String,
-}
 
 struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
@@ -217,10 +211,10 @@ impl AudioManager {
                             }
                             mono
                         };
-                        if let Ok(guard) = tx_arc.lock() {
-                            if let Some(tx) = &*guard {
-                                let _ = tx.try_send(chunk);
-                            }
+                        if let Ok(guard) = tx_arc.lock()
+                            && let Some(tx) = &*guard
+                        {
+                            let _ = tx.try_send(chunk);
                         }
                     },
                     |err| eprintln!("Audio stream error: {}", err),
@@ -257,7 +251,10 @@ impl AudioManager {
         if self.recorder.finalize_recording()? {
             // Skip processing if recording is too short
             if duration < 0.9 {
-                println!("Recording too short ({:.2}s), skipping transcription", duration);
+                println!(
+                    "Recording too short ({:.2}s), skipping transcription",
+                    duration
+                );
                 // Still need to consume the Opus data to clean up the worker
                 if let Ok(mut guard) = self.recorder.tx.lock() {
                     guard.take();
@@ -271,9 +268,9 @@ impl AudioManager {
                 });
                 return Ok(());
             }
-            
+
             play_sound("assets/off.mp3");
-            
+
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
                 guard.take();
@@ -334,35 +331,116 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
 
     let client = reqwest::blocking::Client::new();
 
-    let form = multipart::Form::new()
-        .text("model", "voxtral-mini-latest")
-        .text("language", "en")
-        .part(
-            "file",
-            multipart::Part::bytes(opus_data)
-                .file_name("audio.opus")
-                .mime_str("audio/opus")?,
-        );
+    // Encode Opus data as base64 for Chat API input_audio
+    let b64_audio = base64::engine::general_purpose::STANDARD.encode(&opus_data);
 
-    println!("Sending Opus audio to Mistral API...");
+    // Compose Chat API payload with audio input for Mistral Chat API.
+    // Use content chunks: `text` and `input_audio` (nested object with { data, format }).
+    // Keep temperature at 0 for deterministic transcripts.
+    let body = serde_json::json!({
+        "model": "voxtral-mini-latest",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Transcribe the provided audio in English. Return only the transcript without extra commentary.\n
+                Whenever you see code terms and file names, wrap those terms with a single backtick (`). Few examples: `app.py`, `index.html`, `isLendingProduct()`, `initialWidth=1.0`, `TranscriptionProvider`, `AudioManager`."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please transcribe this audio. Respond with only the transcript."},
+                    {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "opus"}}
+                ]
+            }
+        ],
+        "temperature": 0,
+    });
+
+    println!("Sending Opus audio to Mistral Chat API...");
     let start_time = Instant::now();
 
     let response = client
-        .post("https://api.mistral.ai/v1/audio/transcriptions")
+        .post("https://api.mistral.ai/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
-        .multipart(form)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()?;
 
     let api_latency = start_time.elapsed();
-    let transcription: TranscriptionResponse = response.json()?;
+
+    // Parse a flexible chat response; prefer choices[0].message.content
+    let v: serde_json::Value = response.json()?;
+    let transcript = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c0| c0.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            // Fallback: some responses may return content as array parts
+            v.get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c0| c0.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+        })
+        .unwrap_or_default();
 
     println!("API Response Time: {:.2}ms", api_latency.as_millis());
-    println!("Transcription: {}", transcription.text);
 
-    // Type the transcript into the active window
-    type_transcript(&transcription.text);
+    // Sanitize occasional model artifacts (timestamps, brackets, "No audio provided")
+    let cleaned = sanitize_transcript(&transcript);
+
+    if cleaned.is_empty() {
+        // Empty transcript is acceptable (e.g., silence). Print nothing and skip typing.
+    } else {
+        println!("Transcription: {}", cleaned);
+        type_transcript(&cleaned);
+    }
 
     Ok(())
+}
+
+fn sanitize_transcript(input: &str) -> String {
+    let mut s = input.trim().to_string();
+    // Strip surrounding single/double quotes
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        s = s[1..s.len().saturating_sub(1)].to_string();
+    }
+    // Remove a leading "[00:00] " timestamp if present
+    if s.len() >= 8 && s.as_bytes()[0] == b'[' && s.as_bytes()[6] == b']' && s.as_bytes()[7] == b' '
+    {
+        // check pattern [dd:dd]
+        let bytes = s.as_bytes();
+        let is_digit = |b: u8| b.is_ascii_digit();
+        if is_digit(bytes[1])
+            && is_digit(bytes[2])
+            && bytes[3] == b':'
+            && is_digit(bytes[4])
+            && is_digit(bytes[5])
+        {
+            s = s.split_off(8);
+        }
+    }
+    // Normalize common non-speech messages to empty
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("[no audio provided]")
+        || lower.contains("[no speech detected]")
+        || lower.contains("[no transcript available]")
+    {
+        return String::new();
+    }
+    s.trim().to_string()
 }
 
 fn type_transcript(text: &str) {
@@ -521,9 +599,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!(
-        "Hold Right Alt (AltGr) or Right Command to record. Release to transcribe."
-    );
+    println!("Hold Right Alt (AltGr) or Right Command to record. Release to transcribe.");
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
@@ -573,25 +649,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match ctrl_rx.recv() {
             Ok(ControlMsg::Start) => {
-                if !audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.start_recording() {
-                        eprintln!("Failed to start recording: {}", e);
-                    }
+                if !audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.start_recording()
+                {
+                    eprintln!("Failed to start recording: {}", e);
                 }
             }
             Ok(ControlMsg::Stop) => {
-                if audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
+                if audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.stop_recording()
+                {
+                    eprintln!("Failed to stop recording: {}", e);
                 }
             }
             Ok(ControlMsg::Quit) => {
                 // Gracefully stop if recording, then exit
-                if audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
+                if audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.stop_recording()
+                {
+                    eprintln!("Failed to stop recording: {}", e);
                 }
                 break;
             }
