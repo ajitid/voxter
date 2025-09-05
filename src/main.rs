@@ -342,8 +342,7 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
         "messages": [
             {
                 "role": "system",
-                "content": "Transcribe the provided audio in English. Return only the transcript without extra commentary.\n
-                Whenever you see code terms and file names, wrap those terms with a single backtick (`). Few examples: `app.py`, `index.html`, `isLendingProduct()`, `initialWidth=1.0`, `TranscriptionProvider`, `AudioManager`."
+                "content": "Transcribe the provided audio in English. Return only the transcript without extra commentary."
             },
             {
                 "role": "user",
