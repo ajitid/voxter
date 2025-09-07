@@ -52,9 +52,16 @@ fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     });
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RecordingMode {
+    Hold,
+    Latch,
+}
+
 struct AudioManager {
     recorder: AudioRecorder,
     current_stream: Option<cpal::Stream>,
+    mode: RecordingMode,
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -160,22 +167,28 @@ impl AudioManager {
         Self {
             recorder: AudioRecorder::new(),
             current_stream: None,
+            mode: RecordingMode::Hold,
         }
     }
 
-    fn start_recording(&mut self) -> Result<(), String> {
+    fn start_recording(&mut self, mode: RecordingMode) -> Result<(), String> {
         if self.recorder.is_recording() {
             return Ok(());
         }
 
+        self.mode = mode;
         self.recorder.configure_from_device()?;
         self.recorder.prepare_recording()?;
 
         play_sound("assets/on.mp3");
 
+        let mode_str = match mode {
+            RecordingMode::Hold => "HOLD",
+            RecordingMode::Latch => "LATCH",
+        };
         println!(
-            "Started recording ({}Hz, {} channels)",
-            self.recorder.sample_rate, self.recorder.channels
+            "Started recording in {} mode ({}Hz, {} channels)",
+            mode_str, self.recorder.sample_rate, self.recorder.channels
         );
 
         let host = cpal::default_host();
@@ -323,6 +336,16 @@ impl AudioManager {
         }
 
         Ok(())
+    }
+
+    fn switch_to_latch_mode(&mut self) -> Result<(), String> {
+        if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
+            self.mode = RecordingMode::Latch;
+            println!("Switched to LATCH mode - press AltGr/Right Cmd to stop");
+            Ok(())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -607,15 +630,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!(
-        "Hold Right Alt (AltGr) or Right Command to record. Release to transcribe."
-    );
+    println!("Voxtral Speech-to-Text");
+    println!("Recording modes:");
+    println!("  HOLD: Hold Right Alt (AltGr) or Right Cmd, release to transcribe");
+    println!("  LATCH: Double-press Right Alt (AltGr) or Right Cmd to start, single press to stop");
+    println!("  Press Space while in HOLD mode to switch to LATCH mode");
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
     enum ControlMsg {
-        Start,
-        Stop,
+        StartHold,
+        StopHold,
+        StartLatch,
+        StopLatch,
+        SinglePress,
+        SwitchToLatch,
         Quit,
     }
     let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
@@ -634,17 +663,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // rdev listens on a blocking loop; run it in a thread
     thread::spawn(move || {
+        use rdev::{EventType, Key};
+        use std::time::{Duration, Instant};
+
+        let mut altgr_last_press: Option<Instant> = None;
+        let mut meta_last_press: Option<Instant> = None;
+        let double_press_window = Duration::from_millis(300);
+
         let callback = move |event: rdev::Event| {
-            use rdev::{EventType, Key};
+            let now = Instant::now();
 
             match event.event_type {
-                // Start recording when either key is pressed
-                EventType::KeyPress(Key::AltGr) | EventType::KeyPress(Key::MetaRight) => {
-                    let _ = tx1.send(ControlMsg::Start);
+                EventType::KeyPress(Key::AltGr) => {
+                    if let Some(last_press) = altgr_last_press {
+                        if now.duration_since(last_press) <= double_press_window {
+                            let _ = tx1.send(ControlMsg::StartLatch);
+                            altgr_last_press = None;
+                            return;
+                        }
+                    }
+                    altgr_last_press = Some(now);
+                    let _ = tx1.send(ControlMsg::SinglePress);
                 }
-                // Stop recording when either key is released
+                EventType::KeyPress(Key::MetaRight) => {
+                    if let Some(last_press) = meta_last_press {
+                        if now.duration_since(last_press) <= double_press_window {
+                            let _ = tx1.send(ControlMsg::StartLatch);
+                            meta_last_press = None;
+                            return;
+                        }
+                    }
+                    meta_last_press = Some(now);
+                    let _ = tx1.send(ControlMsg::SinglePress);
+                }
                 EventType::KeyRelease(Key::AltGr) | EventType::KeyRelease(Key::MetaRight) => {
-                    let _ = tx1.send(ControlMsg::Stop);
+                    let _ = tx1.send(ControlMsg::StopHold);
+                }
+                EventType::KeyPress(Key::Space) => {
+                    let _ = tx1.send(ControlMsg::SwitchToLatch);
                 }
                 _ => {}
             }
@@ -658,18 +714,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main thread: handle control messages and operate the audio manager
     loop {
         match ctrl_rx.recv() {
-            Ok(ControlMsg::Start) => {
+            Ok(ControlMsg::StartHold) => {
                 if !audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.start_recording() {
-                        eprintln!("Failed to start recording: {}", e);
+                    if let Err(e) = audio_manager.start_recording(RecordingMode::Hold) {
+                        eprintln!("Failed to start hold recording: {}", e);
                     }
                 }
             }
-            Ok(ControlMsg::Stop) => {
-                if audio_manager.recorder.is_recording() {
+            Ok(ControlMsg::StartLatch) => {
+                if !audio_manager.recorder.is_recording() {
+                    if let Err(e) = audio_manager.start_recording(RecordingMode::Latch) {
+                        eprintln!("Failed to start latch recording: {}", e);
+                    }
+                }
+            }
+            Ok(ControlMsg::StopHold) => {
+                if audio_manager.recorder.is_recording() && audio_manager.mode == RecordingMode::Hold {
                     if let Err(e) = audio_manager.stop_recording() {
                         eprintln!("Failed to stop recording: {}", e);
                     }
+                }
+            }
+            Ok(ControlMsg::StopLatch) => {
+                if audio_manager.recorder.is_recording() && audio_manager.mode == RecordingMode::Latch {
+                    if let Err(e) = audio_manager.stop_recording() {
+                        eprintln!("Failed to stop recording: {}", e);
+                    }
+                }
+            }
+            Ok(ControlMsg::SinglePress) => {
+                if audio_manager.recorder.is_recording() && audio_manager.mode == RecordingMode::Latch {
+                    if let Err(e) = audio_manager.stop_recording() {
+                        eprintln!("Failed to stop recording: {}", e);
+                    }
+                } else if !audio_manager.recorder.is_recording() {
+                    if let Err(e) = audio_manager.start_recording(RecordingMode::Hold) {
+                        eprintln!("Failed to start hold recording: {}", e);
+                    }
+                }
+            }
+            Ok(ControlMsg::SwitchToLatch) => {
+                if let Err(e) = audio_manager.switch_to_latch_mode() {
+                    eprintln!("Failed to switch to latch mode: {}", e);
                 }
             }
             Ok(ControlMsg::Quit) => {
