@@ -310,10 +310,12 @@ impl AudioManager {
                 let dt = start.elapsed();
                 println!("Opus finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
                 if !opus_data.is_empty() {
+                    /*
                     // Save the opus file
                     if let Err(e) = save_opus_file(&opus_data) {
                         eprintln!("Failed to save opus file: {}", e);
                     }
+                    // */
 
                     // Check for speech activity using VAD
                     match check_speech_activity(&opus_data) {
@@ -441,7 +443,7 @@ fn check_speech_activity(opus_data: &[u8]) -> Result<bool, String> {
     Ok(speech_detected)
 }
 
-fn save_opus_file(opus_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+fn _save_opus_file(opus_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis();
