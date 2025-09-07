@@ -639,10 +639,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Control channel from hotkey listener -> main thread
     enum ControlMsg {
-        StartHold,
         StopHold,
         StartLatch,
-        StopLatch,
         SinglePress,
         SwitchToLatch,
         Quit,
@@ -714,13 +712,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main thread: handle control messages and operate the audio manager
     loop {
         match ctrl_rx.recv() {
-            Ok(ControlMsg::StartHold) => {
-                if !audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.start_recording(RecordingMode::Hold) {
-                        eprintln!("Failed to start hold recording: {}", e);
-                    }
-                }
-            }
             Ok(ControlMsg::StartLatch) => {
                 if !audio_manager.recorder.is_recording() {
                     if let Err(e) = audio_manager.start_recording(RecordingMode::Latch) {
@@ -730,13 +721,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(ControlMsg::StopHold) => {
                 if audio_manager.recorder.is_recording() && audio_manager.mode == RecordingMode::Hold {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
-                }
-            }
-            Ok(ControlMsg::StopLatch) => {
-                if audio_manager.recorder.is_recording() && audio_manager.mode == RecordingMode::Latch {
                     if let Err(e) = audio_manager.stop_recording() {
                         eprintln!("Failed to stop recording: {}", e);
                     }
