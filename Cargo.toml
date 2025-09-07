@@ -16,3 +16,4 @@ rdev = "0.5"
 enigo = "0.6"
 ctrlc = "3"
 rodio = { version = "0.21.1" }
+voice_activity_detector = "0.2.1"

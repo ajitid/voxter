@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
+use voice_activity_detector::VoiceActivityDetector;
 
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
@@ -272,8 +273,6 @@ impl AudioManager {
                 return Ok(());
             }
             
-            play_sound("assets/off.mp3");
-            
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
                 guard.take();
@@ -295,15 +294,27 @@ impl AudioManager {
                 let dt = start.elapsed();
                 println!("Opus finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
                 if !opus_data.is_empty() {
-                    /*
-                    // Save Opus to file before transcription
-                    if let Err(e) = save_opus_file(&opus_data) {
-                        eprintln!("Failed to save Opus file: {}", e);
-                    }
-                    */
-                    println!("Processing transcription...");
-                    if let Err(e) = transcribe_audio_opus(opus_data) {
-                        eprintln!("Failed to transcribe audio: {}", e);
+                    // Check for speech activity using VAD
+                    match check_speech_activity(&opus_data) {
+                        Ok(has_speech) => {
+                            if has_speech {
+                                play_sound("assets/off.mp3");
+                                println!("Processing transcription...");
+                                if let Err(e) = transcribe_audio_opus(opus_data) {
+                                    eprintln!("Failed to transcribe audio: {}", e);
+                                }
+                            } else {
+                                println!("No speech detected, skipping transcription");
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
+                            play_sound("assets/off.mp3");
+                            println!("Processing transcription...");
+                            if let Err(e) = transcribe_audio_opus(opus_data) {
+                                eprintln!("Failed to transcribe audio: {}", e);
+                            }
+                        }
                     }
                 } else {
                     eprintln!("No Opus data produced");
@@ -313,6 +324,81 @@ impl AudioManager {
 
         Ok(())
     }
+}
+
+fn check_speech_activity(opus_data: &[u8]) -> Result<bool, String> {
+    let vad_start = Instant::now();
+    
+    // Decode Opus to PCM for VAD analysis
+    let mut decoder = match opus::Decoder::new(48000, opus::Channels::Mono) {
+        Ok(d) => d,
+        Err(e) => return Err(format!("Failed to create Opus decoder: {}", e)),
+    };
+    
+    // Parse OGG container to extract Opus packets
+    let mut ogg_reader = ogg::reading::PacketReader::new(std::io::Cursor::new(opus_data));
+    let mut all_samples = Vec::new();
+    let mut packet_count = 0;
+    
+    while let Some(packet) = ogg_reader.read_packet().map_err(|e| format!("OGG read error: {}", e))? {
+        if packet_count == 0 {
+            // Skip first packet (Opus header)
+            packet_count += 1;
+            continue;
+        }
+        
+        let mut pcm_buffer = vec![0i16; 960]; // 20ms at 48kHz
+        match decoder.decode(&packet.data, &mut pcm_buffer, false) {
+            Ok(samples) => {
+                all_samples.extend_from_slice(&pcm_buffer[..samples]);
+            },
+            Err(e) => {
+                eprintln!("Opus decode error: {}", e);
+                continue;
+            }
+        }
+        packet_count += 1;
+    }
+    
+    if all_samples.is_empty() {
+        return Ok(false);
+    }
+    
+    // Convert i16 to f32 and downsample from 48kHz to 16kHz (3:1 ratio)
+    let f32_samples: Vec<f32> = all_samples.iter()
+        .step_by(3) // Simple downsampling by taking every 3rd sample
+        .map(|&s| s as f32 / 32768.0)
+        .collect();
+    
+    // Initialize VAD
+    let mut vad = match VoiceActivityDetector::builder()
+        .sample_rate(16000)
+        .chunk_size(512usize)
+        .build() {
+        Ok(v) => v,
+        Err(e) => return Err(format!("Failed to create VAD: {}", e)),
+    };
+    
+    // Process audio in chunks suitable for VAD (512 samples for 48kHz)
+    const CHUNK_SIZE: usize = 512;
+    let mut speech_detected = false;
+    
+    for chunk in f32_samples.chunks(CHUNK_SIZE) {
+        if chunk.len() == CHUNK_SIZE {
+            let chunk_owned: Vec<f32> = chunk.to_vec();
+            let is_speech = vad.predict(chunk_owned);
+            if is_speech > 0.5 { // Threshold for speech detection
+                speech_detected = true;
+                break;
+            }
+        }
+    }
+    
+    let vad_time = vad_start.elapsed();
+    println!("VAD analysis time: {:.3} ms, speech detected: {}", 
+             vad_time.as_secs_f64() * 1000.0, speech_detected);
+    
+    Ok(speech_detected)
 }
 
 fn _save_opus_file(opus_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
