@@ -715,6 +715,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Track modifier keys for combination detection
         let mut altgr_pressed = false;
         let mut meta_right_pressed = false;
+        let mut quote_combo_active = false;
 
         let callback = move |event: rdev::Event| {
             let now = Instant::now();
@@ -754,8 +755,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 EventType::KeyPress(Key::Quote) => {
                     if altgr_pressed || meta_right_pressed {
+                        quote_combo_active = true;
+                    }
+                }
+                EventType::KeyRelease(Key::Quote) => {
+                    if quote_combo_active && !altgr_pressed && !meta_right_pressed {
+                        // Both modifier keys and quote have been released
+                        quote_combo_active = false;
                         let _ = tx1.send(ControlMsg::TypeLastTranscription);
                         return;
+                    } else if !altgr_pressed && !meta_right_pressed {
+                        quote_combo_active = false;
                     }
                 }
                 EventType::KeyPress(Key::Space) => {
