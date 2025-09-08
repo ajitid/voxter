@@ -9,6 +9,10 @@ use std::thread;
 use std::time::Instant;
 use voice_activity_detector::VoiceActivityDetector;
 
+// Global state for storing the last transcription
+static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
+    std::sync::OnceLock::new();
+
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
     thread::spawn(move || {
@@ -499,6 +503,12 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     println!("API Response Time: {:.2}ms", api_latency.as_millis());
     println!("Transcription: {}", transcription.text);
 
+    // Store the transcription for later retyping
+    let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
+    if let Ok(mut last_transcription) = last_transcription_arc.lock() {
+        *last_transcription = Some(transcription.text.clone());
+    }
+
     // Type the transcript into the active window
     type_transcript(&transcription.text);
 
@@ -666,6 +676,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  HOLD: Hold Right Alt (AltGr) or Right Cmd, release to transcribe");
     println!("  LATCH: Double-press Right Alt (AltGr) or Right Cmd to start, single press to stop");
     println!("  Press Space while in HOLD mode to switch to LATCH mode");
+    println!("Other hotkeys:");
+    println!("  AltGr+' or Right Cmd+' : Retype last transcription");
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
@@ -674,6 +686,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         StartLatch,
         SinglePress,
         SwitchToLatch,
+        TypeLastTranscription,
         Quit,
     }
     let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
@@ -699,11 +712,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut meta_last_press: Option<Instant> = None;
         let double_press_window = Duration::from_millis(300);
 
+        // Track modifier keys for combination detection
+        let mut altgr_pressed = false;
+        let mut meta_right_pressed = false;
+
         let callback = move |event: rdev::Event| {
             let now = Instant::now();
 
             match event.event_type {
                 EventType::KeyPress(Key::AltGr) => {
+                    altgr_pressed = true;
                     if let Some(last_press) = altgr_last_press {
                         if now.duration_since(last_press) <= double_press_window {
                             let _ = tx1.send(ControlMsg::StartLatch);
@@ -715,6 +733,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = tx1.send(ControlMsg::SinglePress);
                 }
                 EventType::KeyPress(Key::MetaRight) => {
+                    meta_right_pressed = true;
                     if let Some(last_press) = meta_last_press {
                         if now.duration_since(last_press) <= double_press_window {
                             let _ = tx1.send(ControlMsg::StartLatch);
@@ -725,8 +744,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     meta_last_press = Some(now);
                     let _ = tx1.send(ControlMsg::SinglePress);
                 }
-                EventType::KeyRelease(Key::AltGr) | EventType::KeyRelease(Key::MetaRight) => {
+                EventType::KeyRelease(Key::AltGr) => {
+                    altgr_pressed = false;
                     let _ = tx1.send(ControlMsg::StopHold);
+                }
+                EventType::KeyRelease(Key::MetaRight) => {
+                    meta_right_pressed = false;
+                    let _ = tx1.send(ControlMsg::StopHold);
+                }
+                EventType::KeyPress(Key::Quote) => {
+                    if altgr_pressed || meta_right_pressed {
+                        let _ = tx1.send(ControlMsg::TypeLastTranscription);
+                        return;
+                    }
                 }
                 EventType::KeyPress(Key::Space) => {
                     let _ = tx1.send(ControlMsg::SwitchToLatch);
@@ -775,6 +805,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(ControlMsg::SwitchToLatch) => {
                 if let Err(e) = audio_manager.switch_to_latch_mode() {
                     eprintln!("Failed to switch to latch mode: {}", e);
+                }
+            }
+            Ok(ControlMsg::TypeLastTranscription) => {
+                let last_transcription_arc =
+                    LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
+                if let Ok(last_transcription) = last_transcription_arc.lock() {
+                    if let Some(ref text) = *last_transcription {
+                        println!("Retyping last transcription: {}", text);
+                        type_transcript(text);
+                    } else {
+                        println!("No previous transcription to retype");
+                    }
                 }
             }
             Ok(ControlMsg::Quit) => {
