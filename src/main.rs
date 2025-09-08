@@ -180,6 +180,18 @@ impl AudioManager {
         self.recorder.configure_from_device()?;
         self.recorder.prepare_recording()?;
 
+        /*
+        Not only audio-out systems take time to wake up from sleep, but audio-in systems (like mic) take time to wake up as well.
+        So the delay + small audio play is rather a beneficial side-effect gives the chance of audio-in to boot up too.
+
+        From https://handy.computer 's author cjpais:
+        Sometimes it doesn't pick up the first one or two words.
+
+        Q. Sometimes it doesn't pick up the first one or two words.
+        A. Maybe try the “always on microphone” setting and see if that helps,
+           it can take the audio system some time to get all the necessary resources from the system.
+           On macOS it’s about 100-200ms but I haven’t measured on other platforms.
+        */
         play_sound("assets/on.mp3");
 
         let mode_str = match mode {
