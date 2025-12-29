@@ -719,53 +719,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use rdev::{EventType, Key};
         use std::time::{Duration, Instant};
 
-        let mut altgr_last_press: Option<Instant> = None;
-        let mut meta_last_press: Option<Instant> = None;
+        let mut modifier_last_press: Option<Instant> = None;
         let double_press_window = Duration::from_millis(300);
 
-        // Track modifier keys for combination detection
-        let mut altgr_pressed = false;
-        let mut meta_right_pressed = false;
+        // Platform-specific modifier key
+        #[cfg(target_os = "macos")]
+        const MODIFIER_KEY: Key = Key::MetaRight;
+        #[cfg(not(target_os = "macos"))]
+        const MODIFIER_KEY: Key = Key::AltGr;
+
+        // Track modifier key for combination detection
+        let mut modifier_pressed = false;
         let mut quote_combo_active = false;
 
         let callback = move |event: rdev::Event| {
             let now = Instant::now();
 
             match event.event_type {
-                EventType::KeyPress(Key::AltGr) => {
-                    altgr_pressed = true;
-                    if let Some(last_press) = altgr_last_press {
+                EventType::KeyPress(key) if key == MODIFIER_KEY => {
+                    modifier_pressed = true;
+                    if let Some(last_press) = modifier_last_press {
                         if now.duration_since(last_press) <= double_press_window {
                             let _ = tx1.send(ControlMsg::StartLatch);
-                            altgr_last_press = None;
+                            modifier_last_press = None;
                             return;
                         }
                     }
-                    altgr_last_press = Some(now);
+                    modifier_last_press = Some(now);
                     let _ = tx1.send(ControlMsg::SinglePress);
                 }
-                EventType::KeyPress(Key::MetaRight) => {
-                    meta_right_pressed = true;
-                    if let Some(last_press) = meta_last_press {
-                        if now.duration_since(last_press) <= double_press_window {
-                            let _ = tx1.send(ControlMsg::StartLatch);
-                            meta_last_press = None;
-                            return;
-                        }
-                    }
-                    meta_last_press = Some(now);
-                    let _ = tx1.send(ControlMsg::SinglePress);
-                }
-                EventType::KeyRelease(Key::AltGr) => {
-                    altgr_pressed = false;
-                    let _ = tx1.send(ControlMsg::StopHold);
-                }
-                EventType::KeyRelease(Key::MetaRight) => {
-                    meta_right_pressed = false;
+                EventType::KeyRelease(key) if key == MODIFIER_KEY => {
+                    modifier_pressed = false;
                     let _ = tx1.send(ControlMsg::StopHold);
                 }
                 EventType::KeyPress(Key::Quote) => {
-                    if altgr_pressed || meta_right_pressed {
+                    if modifier_pressed {
                         quote_combo_active = true;
                     }
                 }
