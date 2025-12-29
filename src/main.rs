@@ -673,11 +673,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Voxtral Speech-to-Text");
     println!("Recording modes:");
-    println!("  HOLD: Hold Right Alt (AltGr) or Right Cmd, release to transcribe");
-    println!("  LATCH: Double-press Right Alt (AltGr) or Right Cmd to start, single press to stop");
+    #[cfg(target_os = "macos")]
+    {
+        println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
+        println!("  LATCH: Double-press Right Cmd to start, single press to stop");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("  HOLD: Hold Right Alt (AltGr), release to transcribe");
+        println!("  LATCH: Double-press Right Alt (AltGr) to start, single press to stop");
+    }
     println!("  Press Space while in HOLD mode to switch to LATCH mode");
     println!("Other hotkeys:");
-    println!("  AltGr+' or Right Cmd+' : Retype last transcription");
+    #[cfg(target_os = "macos")]
+    println!("  Right Cmd+' : Retype last transcription");
+    #[cfg(not(target_os = "macos"))]
+    println!("  AltGr+' : Retype last transcription");
     println!("Waiting for hotkey...");
 
     // Control channel from hotkey listener -> main thread
@@ -759,13 +770,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 EventType::KeyRelease(Key::Quote) => {
-                    if quote_combo_active && !altgr_pressed && !meta_right_pressed {
-                        // Both modifier keys and quote have been released
+                    if quote_combo_active {
+                        // Trigger when quote is released while combo was active
+                        // Works regardless of whether modifier is still held
                         quote_combo_active = false;
                         let _ = tx1.send(ControlMsg::TypeLastTranscription);
                         return;
-                    } else if !altgr_pressed && !meta_right_pressed {
-                        quote_combo_active = false;
                     }
                 }
                 EventType::KeyPress(Key::Space) => {
