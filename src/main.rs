@@ -676,14 +676,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     {
         println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
-        println!("  LATCH: Double-press Right Cmd to start, single press to stop");
+        println!("  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop");
     }
     #[cfg(not(target_os = "macos"))]
     {
         println!("  HOLD: Hold Right Alt (AltGr), release to transcribe");
-        println!("  LATCH: Double-press Right Alt (AltGr) to start, single press to stop");
+        println!("  LATCH: Press Space while in HOLD mode to switch to LATCH, then press AltGr to stop");
     }
-    println!("  Press Space while in HOLD mode to switch to LATCH mode");
     println!("Other hotkeys:");
     #[cfg(target_os = "macos")]
     println!("  Right Cmd+' : Retype last transcription");
@@ -694,7 +693,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Control channel from hotkey listener -> main thread
     enum ControlMsg {
         StopHold,
-        StartLatch,
         SinglePress,
         SwitchToLatch,
         TypeLastTranscription,
@@ -717,10 +715,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rdev listens on a blocking loop; run it in a thread
     thread::spawn(move || {
         use rdev::{EventType, Key};
-        use std::time::{Duration, Instant};
-
-        let mut modifier_last_press: Option<Instant> = None;
-        let double_press_window = Duration::from_millis(300);
 
         // Platform-specific modifier key
         #[cfg(target_os = "macos")]
@@ -733,19 +727,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut quote_combo_active = false;
 
         let callback = move |event: rdev::Event| {
-            let now = Instant::now();
-
             match event.event_type {
                 EventType::KeyPress(key) if key == MODIFIER_KEY => {
                     modifier_pressed = true;
-                    if let Some(last_press) = modifier_last_press {
-                        if now.duration_since(last_press) <= double_press_window {
-                            let _ = tx1.send(ControlMsg::StartLatch);
-                            modifier_last_press = None;
-                            return;
-                        }
-                    }
-                    modifier_last_press = Some(now);
                     let _ = tx1.send(ControlMsg::SinglePress);
                 }
                 EventType::KeyRelease(key) if key == MODIFIER_KEY => {
@@ -781,13 +765,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main thread: handle control messages and operate the audio manager
     loop {
         match ctrl_rx.recv() {
-            Ok(ControlMsg::StartLatch) => {
-                if !audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.start_recording(RecordingMode::Latch) {
-                        eprintln!("Failed to start latch recording: {}", e);
-                    }
-                }
-            }
             Ok(ControlMsg::StopHold) => {
                 if audio_manager.recorder.is_recording()
                     && audio_manager.mode == RecordingMode::Hold
