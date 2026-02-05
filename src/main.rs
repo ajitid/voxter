@@ -474,11 +474,14 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     dotenvy::dotenv().ok();
 
     let api_key =
-        env::var("MISTRAL_API_KEY").expect("MISTRAL_API_KEY environment variable must be set");
+        env::var("VOXTRAL_API_KEY").expect("VOXTRAL_API_KEY environment variable must be set");
+
+    // Optional: domain-specific vocabulary for better transcription accuracy
+    let context_bias = env::var("VOXTRAL_CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
-    let form = multipart::Form::new()
+    let mut form = multipart::Form::new()
         .text("model", "voxtral-mini-latest")
         .text("language", "en")
         .part(
@@ -487,6 +490,11 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
                 .file_name("audio.opus")
                 .mime_str("audio/opus")?,
         );
+
+    // Add context biasing if configured (up to 100 words/phrases)
+    if let Some(bias) = context_bias {
+        form = form.text("context_bias", bias);
+    }
 
     println!("Sending Opus audio to Mistral API...");
     let start_time = Instant::now();
@@ -676,12 +684,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     {
         println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
-        println!("  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop");
+        println!(
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop"
+        );
     }
     #[cfg(not(target_os = "macos"))]
     {
         println!("  HOLD: Hold Right Alt (AltGr), release to transcribe");
-        println!("  LATCH: Press Space while in HOLD mode to switch to LATCH, then press AltGr to stop");
+        println!(
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press AltGr to stop"
+        );
     }
     println!("Other hotkeys:");
     #[cfg(target_os = "macos")]
