@@ -3,49 +3,47 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-This is a Rust project for speech-to-text functionality called "voxtral-speech-to-text". It's a desktop application that records audio via manual input and transcribes it using Mistral's Voxtral API.
+A Rust desktop application that records audio via global hotkeys and transcribes it using Mistral's Voxtral API. Transcriptions are automatically typed into the active window.
 
 ## Development Commands
-
-### Build and Run
 - `cargo build` - Build the project
 - `cargo run` - Build and run the application
-- `cargo check` - Quick syntax and type checking without building
-- `cargo test` - Run tests
-- `cargo fmt` - Format code according to Rust standards
-- `cargo clippy` - Run the Clippy linter for additional checks
+- `cargo check` - Quick syntax and type checking
+- `cargo fmt` - Format code
+- `cargo clippy` - Run linter
+- Run `cargo fmt && cargo clippy` before committing (Rust 2024 edition)
 
-### Development Workflow
-- Use `cargo check` for fast feedback during development
-- Run `cargo fmt` and `cargo clippy` before committing changes
-- The project uses Rust 2024 edition
+## Environment Setup
+- Requires `MISTRAL_API_KEY` environment variable (loaded via `.env` file with dotenvy)
+- On macOS: App needs Accessibility permissions for `enigo` keyboard simulation and `rdev` global hotkey capture
 
 ## Architecture
-The application is structured around global hotkey-triggered audio recording:
 
-### Core Components
-- `AudioManager` - Manages recording state and audio streams  
-- `AudioRecorder` - Handles Opus encoding and audio data processing
-- Global hotkey system using `rdev` (Right Alt/AltGr or Right Command keys)
-- Channel-based communication between components using Arc<Mutex<T>> and flume channels
-- Real-time Opus encoding worker thread with Ogg container format
+### Recording Modes
+- **HOLD mode**: Hold Right Cmd (macOS) / Right Alt (other) to record, release to transcribe
+- **LATCH mode**: Press Space during HOLD to switch; press hotkey again to stop recording
+- **Retype**: Right Cmd/Alt + ' (quote) retypes the last transcription
 
-### Audio Processing Flow
-1. Application starts → Listens for global hotkey press
-2. Hotkey pressed → Begin recording with real-time Opus encoding
-3. Audio data captured via `cpal` with f32 to i16 PCM conversion and mono downmixing
-4. Streaming Opus encoder processes audio in 20ms frames within Ogg container
-5. Hotkey released → Stop recording and finalize Opus stream
-6. Opus audio sent directly to Mistral API for transcription
-7. Transcribed text automatically typed into active window using `enigo`
-8. Audio feedback played via `rodio` (on.mp3/off.mp3 sound cues)
+### Core Components (all in `src/main.rs`)
+- `AudioManager` - Orchestrates recording lifecycle, owns `cpal::Stream` (not Send/Sync, must stay on main thread)
+- `AudioRecorder` - Manages recording state with `Arc<Mutex<T>>` for thread-safe access
+- `run_opus_worker()` - Dedicated thread for real-time Opus encoding into Ogg container
+- `check_speech_activity()` - VAD (Voice Activity Detection) to skip transcription when no speech detected
 
-### External Dependencies
-- Requires `MISTRAL_API_KEY` environment variable for transcription
-- Uses Mistral's `voxtral-mini-latest` model  
-- Audio format: Real-time Opus encoding in Ogg container (24kbps bitrate)
-- Global hotkey detection via `rdev` library (platform-dependent permissions may apply)
-- Text input simulation via `enigo` for typing transcriptions into active windows
-- Audio playback via `rodio` for user feedback sounds
-- Uses `dotenvy` for loading environment variables from .env files
-- API response time measurement and automatic text typing included
+### Audio Pipeline
+1. `cpal` captures audio (f32 samples at device sample rate)
+2. Audio callback downmixes to mono, converts f32→i16, sends via `flume` channel
+3. Opus worker thread encodes 20ms frames (24kbps) into Ogg container
+4. On stop: finalize Ogg stream, run VAD check, send to Mistral API if speech detected
+5. Transcription auto-typed via `enigo`, audio feedback via `rodio` (assets/on.mp3, assets/off.mp3)
+
+### Threading Model
+- Main thread: Runs `AudioManager`, handles control messages via `mpsc` channel
+- rdev thread: Global hotkey listener, sends `ControlMsg` to main thread
+- Opus worker thread: Spawned per recording session
+- Transcription thread: Spawned after recording stops for API call + typing
+
+### Key Implementation Details
+- Recordings under 0.9s are skipped (too short for meaningful transcription)
+- VAD uses `voice_activity_detector` crate with 16kHz downsampled audio
+- Audio feedback sounds play with 100ms silence prefix to avoid audio system wake-up cut-off
