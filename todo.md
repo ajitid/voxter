@@ -1,0 +1,3 @@
+- use .m4a as it produces smaller files than .wav.
+  - issue: this requires ffmpeg. also if there's some conversion involved and not direct recording then there's no point as it'll increase the latency
+-
