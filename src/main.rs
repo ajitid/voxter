@@ -247,10 +247,10 @@ impl AudioManager {
                             }
                             mono
                         };
-                        if let Ok(guard) = tx_arc.lock() {
-                            if let Some(tx) = &*guard {
-                                let _ = tx.try_send(chunk);
-                            }
+                        if let Ok(guard) = tx_arc.lock()
+                            && let Some(tx) = &*guard
+                        {
+                            let _ = tx.try_send(chunk);
                         }
                     },
                     |err| eprintln!("Audio stream error: {}", err),
@@ -327,9 +327,9 @@ impl AudioManager {
                 println!("Opus finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
                 if !opus_data.is_empty() {
                     /*
-                    // Save the opus file
-                    if let Err(e) = save_opus_file(&opus_data) {
-                        eprintln!("Failed to save opus file: {}", e);
+                    // Save the Ogg Opus file
+                    if let Err(e) = save_ogg_file(&opus_data) {
+                        eprintln!("Failed to save Ogg Opus file: {}", e);
                     }
                     // */
 
@@ -459,51 +459,74 @@ fn check_speech_activity(opus_data: &[u8]) -> Result<bool, String> {
     Ok(speech_detected)
 }
 
-fn _save_opus_file(opus_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+fn _save_ogg_file(ogg_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis();
-    let filename = format!("recording_{}.opus", ts);
+    let filename = format!("recording_{}.ogg", ts);
     let mut file = File::create(&filename)?;
-    file.write_all(opus_data)?;
-    println!("Saved Opus audio to: {}", filename);
+    file.write_all(ogg_data)?;
+    println!("Saved Ogg Opus audio to: {}", filename);
     Ok(filename)
+}
+
+fn build_groq_prompt(context_bias: &str) -> Option<String> {
+    let mut terms = Vec::new();
+
+    for term in context_bias.split(',').map(str::trim) {
+        if term.is_empty() || terms.contains(&term) {
+            continue;
+        }
+        terms.push(term);
+    }
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut prompt = format!("Use these spellings if relevant: {}.", terms.join(", "));
+
+    const MAX_PROMPT_CHARS: usize = 400;
+    if prompt.len() > MAX_PROMPT_CHARS {
+        prompt.truncate(MAX_PROMPT_CHARS);
+    }
+
+    Some(prompt)
 }
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let api_key =
-        env::var("VOXTRAL_API_KEY").expect("VOXTRAL_API_KEY environment variable must be set");
-
-    // Optional: domain-specific vocabulary for better transcription accuracy
-    let context_bias = env::var("VOXTRAL_CONTEXT_BIAS").ok();
+    let api_key = env::var("GROQ_API_KEY").expect("GROQ_API_KEY environment variable must be set");
+    let context_bias = env::var("CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
     let mut form = multipart::Form::new()
-        .text("model", "voxtral-mini-latest")
+        .text("model", "whisper-large-v3-turbo")
         .text("language", "en")
+        .text("response_format", "json")
+        .text("temperature", "0")
         .part(
             "file",
             multipart::Part::bytes(opus_data)
-                .file_name("audio.opus")
-                .mime_str("audio/opus")?,
+                .file_name("audio.ogg")
+                .mime_str("audio/ogg")?,
         );
 
-    // Add context biasing if configured (up to 100 words/phrases)
-    if let Some(bias) = context_bias {
-        form = form.text("context_bias", bias);
+    if let Some(prompt) = context_bias.as_deref().and_then(build_groq_prompt) {
+        form = form.text("prompt", prompt);
     }
 
-    println!("Sending Opus audio to Mistral API...");
+    println!("Sending Ogg Opus audio to Groq Whisper API...");
     let start_time = Instant::now();
 
     let response = client
-        .post("https://api.mistral.ai/v1/audio/transcriptions")
+        .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
-        .send()?;
+        .send()?
+        .error_for_status()?;
 
     let api_latency = start_time.elapsed();
     let transcription: TranscriptionResponse = response.json()?;
@@ -679,7 +702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Manager must stay on main thread (cpal stream is not Send/Sync)
     let mut audio_manager = AudioManager::new();
 
-    println!("Voxtral Speech-to-Text");
+    println!("Groq Whisper Speech-to-Text");
     println!("Recording modes:");
     #[cfg(target_os = "macos")]
     {
@@ -759,7 +782,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Works regardless of whether modifier is still held
                         quote_combo_active = false;
                         let _ = tx1.send(ControlMsg::TypeLastTranscription);
-                        return;
                     }
                 }
                 EventType::KeyPress(Key::Space) => {
@@ -780,10 +802,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(ControlMsg::StopHold) => {
                 if audio_manager.recorder.is_recording()
                     && audio_manager.mode == RecordingMode::Hold
+                    && let Err(e) = audio_manager.stop_recording()
                 {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
+                    eprintln!("Failed to stop recording: {}", e);
                 }
             }
             Ok(ControlMsg::SinglePress) => {
@@ -793,10 +814,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(e) = audio_manager.stop_recording() {
                         eprintln!("Failed to stop recording: {}", e);
                     }
-                } else if !audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.start_recording(RecordingMode::Hold) {
-                        eprintln!("Failed to start hold recording: {}", e);
-                    }
+                } else if !audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.start_recording(RecordingMode::Hold)
+                {
+                    eprintln!("Failed to start hold recording: {}", e);
                 }
             }
             Ok(ControlMsg::SwitchToLatch) => {
@@ -818,10 +839,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(ControlMsg::Quit) => {
                 // Gracefully stop if recording, then exit
-                if audio_manager.recorder.is_recording() {
-                    if let Err(e) = audio_manager.stop_recording() {
-                        eprintln!("Failed to stop recording: {}", e);
-                    }
+                if audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.stop_recording()
+                {
+                    eprintln!("Failed to stop recording: {}", e);
                 }
                 break;
             }
