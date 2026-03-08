@@ -7,20 +7,20 @@
 - [x] Confirm whether this should be a clean breaking change
 
 ## Phase 2 — code changes
-- [ ] Replace Mistral/Voxtral API usage with Groq transcription endpoint
-- [ ] Rename env vars to `GROQ_API_KEY` and `CONTEXT_BIAS`
-- [ ] Map `CONTEXT_BIAS` to Groq `prompt`
-- [ ] Update upload metadata from `.opus` / `audio/opus` to `.ogg` / `audio/ogg`
-- [ ] Improve non-2xx response handling
-- [ ] Update provider-specific logging strings
+- [x] Replace Mistral/Voxtral API usage with Groq transcription endpoint
+- [x] Rename env vars to `GROQ_API_KEY` and `CONTEXT_BIAS`
+- [x] Map `CONTEXT_BIAS` to Groq `prompt`
+- [x] Update upload metadata from `.opus` / `audio/opus` to `.ogg` / `audio/ogg`
+- [x] Improve non-2xx response handling
+- [x] Update provider-specific logging strings
 
 ## Phase 3 — docs/config
-- [ ] Update `CLAUDE.md` to document Groq Whisper usage
-- [ ] Verify `.env.sample` matches the new env vars
+- [x] Update `CLAUDE.md` to document Groq Whisper usage
+- [x] Verify `.env.sample` matches the new env vars
 
 ## Phase 4 — verification
-- [ ] Run `cargo check`
-- [ ] Run `cargo fmt`
-- [ ] Run `cargo clippy`
+- [x] Run `cargo check`
+- [x] Run `cargo fmt`
+- [x] Run `cargo clippy`
 - [ ] Smoke-test transcription flow with `GROQ_API_KEY`
 - [ ] Smoke-test spelling guidance via `CONTEXT_BIAS`
