@@ -549,11 +549,13 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
 fn type_transcript(text: &str) {
     // Best effort: avoid panics; just log errors.
     // Enigo types into the currently focused window.
-    // Add a trailing space to separate entries.
-    let to_type = if text.ends_with(['.', '!', '?', ':', ';']) {
-        format!("{} ", text)
+    // Normalize any model-provided surrounding whitespace, then add a trailing
+    // space only when the transcript ends with sentence punctuation.
+    let clean = text.trim();
+    let to_type = if clean.ends_with(['.', '!', '?', ':', ';']) {
+        format!("{} ", clean)
     } else {
-        text.to_string()
+        clean.to_string()
     };
 
     // Typing can take time; run in a detached thread so we don't block.
