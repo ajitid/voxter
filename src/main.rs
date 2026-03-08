@@ -531,17 +531,19 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     let api_latency = start_time.elapsed();
     let transcription: TranscriptionResponse = response.json()?;
 
-    println!("API Response Time: {:.2}ms", api_latency.as_millis());
-    println!("Transcription: {}", transcription.text);
+    let clean_text = transcription.text.trim().to_string();
 
-    // Store the transcription for later retyping
+    println!("API Response Time: {:.2}ms", api_latency.as_millis());
+    println!("Transcription: {}", clean_text);
+
+    // Store the normalized transcription for later retyping
     let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
     if let Ok(mut last_transcription) = last_transcription_arc.lock() {
-        *last_transcription = Some(transcription.text.clone());
+        *last_transcription = Some(clean_text.clone());
     }
 
     // Type the transcript into the active window
-    type_transcript(&transcription.text);
+    type_transcript(&clean_text);
 
     Ok(())
 }
