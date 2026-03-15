@@ -757,6 +757,18 @@ impl App {
         }
     }
 
+    fn update_loop_mode(&self, event_loop: &ActiveEventLoop) {
+        let visible = self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.is_visible());
+        event_loop.set_control_flow(if visible {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::Wait
+        });
+    }
+
     fn handle_control(&mut self, event_loop: &ActiveEventLoop, msg: ControlMsg) {
         match msg {
             ControlMsg::StopHold => {
@@ -831,6 +843,7 @@ impl ApplicationHandler<AppEvent> for App {
                 Err(e) => eprintln!("Overlay initialization failed: {}", e),
             }
         }
+        self.update_loop_mode(event_loop);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -842,6 +855,7 @@ impl ApplicationHandler<AppEvent> for App {
                 {
                     eprintln!("Overlay update failed: {e}");
                 }
+                self.update_loop_mode(event_loop);
             }
         }
     }
@@ -870,7 +884,13 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(overlay) = self.overlay.as_ref()
+            && overlay.is_visible()
+        {
+            overlay.request_redraw();
+        }
+    }
 }
 
 fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {

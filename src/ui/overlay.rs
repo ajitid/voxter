@@ -1,5 +1,6 @@
 use crate::ui::render::OverlayRenderer;
 use std::sync::Arc;
+use std::time::Instant;
 use winit::dpi::{LogicalSize, PhysicalPosition, Position};
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
@@ -20,6 +21,7 @@ pub struct OverlayController {
     window: Arc<Window>,
     renderer: OverlayRenderer,
     state: OverlayState,
+    visible_since: Option<Instant>,
 }
 
 impl OverlayController {
@@ -60,11 +62,16 @@ impl OverlayController {
             window,
             renderer,
             state: OverlayState::Hidden,
+            visible_since: None,
         })
     }
 
     pub fn window_id(&self) -> winit::window::WindowId {
         self.window.id()
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.state != OverlayState::Hidden
     }
 
     pub fn update_state(
@@ -76,9 +83,11 @@ impl OverlayController {
             return Ok(());
         }
 
+        let was_visible = self.is_visible();
         self.state = next_state;
 
-        if next_state == OverlayState::Hidden {
+        if !self.is_visible() {
+            self.visible_since = None;
             self.window.set_visible(false);
             return Ok(());
         }
@@ -88,33 +97,39 @@ impl OverlayController {
             return Err(e);
         }
 
-        let label = match next_state {
-            OverlayState::Recording => "recording",
-            OverlayState::RecordingLatch => "recording (latch)",
-            OverlayState::Transcribing => "transcribing",
-            OverlayState::Hidden => "",
-        };
+        if !was_visible {
+            self.visible_since = Some(Instant::now());
+        }
 
-        self.renderer.draw_label(label);
         self.window.set_visible(true);
-        self.window.request_redraw();
+        if !was_visible {
+            self.window.request_redraw();
+        }
+
         Ok(())
     }
 
     pub fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.renderer.resize(new_size);
-        if self.state != OverlayState::Hidden {
-            let label = match self.state {
-                OverlayState::Recording => "recording",
-                OverlayState::RecordingLatch => "recording (latch)",
-                OverlayState::Transcribing => "transcribing",
-                OverlayState::Hidden => "",
-            };
-            self.renderer.draw_label(label);
+        if self.is_visible() {
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn request_redraw(&self) {
+        if self.is_visible() {
+            self.window.request_redraw();
         }
     }
 
     pub fn redraw(&mut self) -> Result<(), String> {
+        if !self.is_visible() {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let started_at = self.visible_since.unwrap_or(now);
+        self.renderer.draw_frame(self.state, now, started_at);
         self.renderer.render()
     }
 

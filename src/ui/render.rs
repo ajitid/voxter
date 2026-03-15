@@ -1,9 +1,11 @@
+use crate::ui::overlay::OverlayState;
 use bytemuck::{Pod, Zeroable};
 use font_kit::font::Font;
 use raqote::{DrawOptions, DrawTarget, Point, SolidSource, Source};
 use std::fs::File;
 use std::mem;
 use std::sync::Arc;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -360,43 +362,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         self.dt = DrawTarget::new(size.width as i32, size.height as i32);
     }
 
-    pub fn draw_label(&mut self, text: &str) {
-        self.dt
-            .clear(SolidSource::from_unpremultiplied_argb(0, 0, 0, 0));
+    fn state_label(state: OverlayState) -> &'static str {
+        match state {
+            OverlayState::Hidden => "",
+            OverlayState::Recording => "recording",
+            OverlayState::RecordingLatch => "recording (latch)",
+            OverlayState::Transcribing => "transcribing",
+        }
+    }
 
-        let point_size = (((self.size.height as f32 * 0.45) + 8.0).clamp(24.0, 50.0)).round();
+    fn draw_text(&mut self, text: &str, x: f32, y: f32, point_size: f32, color: SolidSource) {
         let units_per_em = self.font.metrics().units_per_em.max(1) as f32;
         let advance_scale = point_size / units_per_em;
 
         let mut glyph_ids = Vec::with_capacity(text.chars().count());
-        let mut glyph_advances_px = Vec::with_capacity(text.chars().count());
-        let mut text_width = 0.0f32;
+        let mut positions = Vec::with_capacity(text.chars().count());
 
+        let mut pen_x = x;
         for ch in text.chars() {
             if let Some(id) = self.font.glyph_for_char(ch) {
+                positions.push(Point::new(pen_x.round(), y.round()));
                 let adv_px = self
                     .font
                     .advance(id)
                     .map(|adv| adv.x() * advance_scale)
                     .unwrap_or(point_size * 0.5);
                 glyph_ids.push(id);
-                glyph_advances_px.push(adv_px);
-                text_width += adv_px;
+                pen_x += adv_px;
             } else if ch == ' ' {
-                text_width += point_size * 0.35;
+                pen_x += point_size * 0.35;
             }
-        }
-
-        let x = ((self.size.width as f32 - text_width) / 2.0).max(8.0);
-        let y = (self.size.height as f32 * 0.58)
-            .max(point_size + 2.0)
-            .round();
-
-        let mut pen_x = x;
-        let mut positions = Vec::with_capacity(glyph_ids.len());
-        for adv_px in &glyph_advances_px {
-            positions.push(Point::new(pen_x.round(), y));
-            pen_x += *adv_px;
         }
 
         if !glyph_ids.is_empty() {
@@ -405,10 +400,33 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
                 point_size,
                 &glyph_ids,
                 &positions,
-                &Source::Solid(SolidSource::from_unpremultiplied_argb(255, 255, 255, 255)),
+                &Source::Solid(color),
                 &DrawOptions::new(),
             );
         }
+    }
+
+    pub fn draw_frame(&mut self, state: OverlayState, now: Instant, started_at: Instant) {
+        let _elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+
+        let width = self.size.width.max(1) as f32;
+        let height = self.size.height.max(1) as f32;
+
+        self.dt
+            .clear(SolidSource::from_unpremultiplied_argb(0, 0, 0, 0));
+
+        let label = Self::state_label(state);
+        let point_size = (((height * 0.45) + 8.0).clamp(24.0, 50.0)).round();
+        let approx_width = label.chars().count() as f32 * point_size * 0.52;
+        let x = ((width - approx_width) / 2.0).max(8.0);
+        let y = (height * 0.58).max(point_size + 2.0);
+        self.draw_text(
+            label,
+            x,
+            y,
+            point_size,
+            SolidSource::from_unpremultiplied_argb(255, 255, 255, 255),
+        );
 
         let bytes = self.dt.get_data_u8();
         self.queue.write_texture(
