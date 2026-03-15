@@ -1,3 +1,8 @@
+#[cfg(not(target_os = "macos"))]
+compile_error!("This build currently supports macOS only (rdev + on-demand cursor query).");
+
+mod ui;
+
 use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
@@ -7,7 +12,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
+use ui::overlay::{OverlayController, OverlayState};
 use voice_activity_detector::VoiceActivityDetector;
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::window::WindowId;
 
 // Global state for storing the last transcription
 static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
@@ -60,6 +70,21 @@ fn play_sound<P: AsRef<std::path::Path>>(path: P) {
 enum RecordingMode {
     Hold,
     Latch,
+}
+
+#[derive(Clone)]
+enum ControlMsg {
+    StopHold,
+    SinglePress,
+    SwitchToLatch,
+    TypeLastTranscription,
+    Quit,
+}
+
+#[derive(Clone)]
+enum AppEvent {
+    Control(ControlMsg),
+    Overlay(OverlayState),
 }
 
 struct AudioManager {
@@ -268,7 +293,7 @@ impl AudioManager {
         Ok(())
     }
 
-    fn stop_recording(&mut self) -> Result<(), String> {
+    fn stop_recording(&mut self, proxy: EventLoopProxy<AppEvent>) -> Result<(), String> {
         if !self.recorder.is_recording() {
             return Ok(());
         }
@@ -302,6 +327,7 @@ impl AudioManager {
                         let _ = rx.recv(); // Consume and discard
                     }
                 });
+                let _ = proxy.send_event(AppEvent::Overlay(OverlayState::Hidden));
                 return Ok(());
             }
 
@@ -310,6 +336,7 @@ impl AudioManager {
                 guard.take();
             }
             let result_rx_arc = Arc::clone(&self.recorder.result_rx);
+            let proxy_clone = proxy.clone();
             std::thread::spawn(move || {
                 println!("Finalizing Opus stream...");
                 let start = Instant::now();
@@ -337,26 +364,36 @@ impl AudioManager {
                     match check_speech_activity(&opus_data) {
                         Ok(has_speech) => {
                             if has_speech {
+                                let _ = proxy_clone
+                                    .send_event(AppEvent::Overlay(OverlayState::Transcribing));
                                 play_sound("assets/off.mp3");
                                 println!("Processing transcription...");
                                 if let Err(e) = transcribe_audio_opus(opus_data) {
                                     eprintln!("Failed to transcribe audio: {}", e);
                                 }
+                                let _ =
+                                    proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
                             } else {
                                 println!("No speech detected, skipping transcription");
+                                let _ =
+                                    proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
                             }
                         }
                         Err(e) => {
                             eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
+                            let _ = proxy_clone
+                                .send_event(AppEvent::Overlay(OverlayState::Transcribing));
                             play_sound("assets/off.mp3");
                             println!("Processing transcription...");
                             if let Err(e) = transcribe_audio_opus(opus_data) {
                                 eprintln!("Failed to transcribe audio: {}", e);
                             }
+                            let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
                         }
                     }
                 } else {
                     eprintln!("No Opus data produced");
+                    let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
                 }
             });
         }
@@ -364,13 +401,13 @@ impl AudioManager {
         Ok(())
     }
 
-    fn switch_to_latch_mode(&mut self) -> Result<(), String> {
+    fn switch_to_latch_mode(&mut self) -> Result<bool, String> {
         if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
             self.mode = RecordingMode::Latch;
             println!("Switched to LATCH mode - press AltGr/Right Cmd to stop");
-            Ok(())
+            Ok(true)
         } else {
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -703,134 +740,60 @@ fn run_opus_worker(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Manager must stay on main thread (cpal stream is not Send/Sync)
-    let mut audio_manager = AudioManager::new();
+struct App {
+    audio_manager: AudioManager,
+    overlay: Option<OverlayController>,
+    overlay_window_id: Option<WindowId>,
+    proxy: EventLoopProxy<AppEvent>,
+}
 
-    println!("Groq Whisper Speech-to-Text");
-    println!("Recording modes:");
-    #[cfg(target_os = "macos")]
-    {
-        println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
-        println!(
-            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop"
-        );
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        println!("  HOLD: Hold Right Alt (AltGr), release to transcribe");
-        println!(
-            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press AltGr to stop"
-        );
-    }
-    println!("Other hotkeys:");
-    #[cfg(target_os = "macos")]
-    println!("  Right Cmd+' : Retype last transcription");
-    #[cfg(not(target_os = "macos"))]
-    println!("  AltGr+' : Retype last transcription");
-    println!("Waiting for hotkey...");
-
-    // Control channel from hotkey listener -> main thread
-    enum ControlMsg {
-        StopHold,
-        SinglePress,
-        SwitchToLatch,
-        TypeLastTranscription,
-        Quit,
-    }
-    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<ControlMsg>();
-
-    // Ctrl+C handler: request graceful shutdown
-    {
-        let tx = ctrl_tx.clone();
-        ctrlc::set_handler(move || {
-            let _ = tx.send(ControlMsg::Quit);
-        })
-        .expect("failed to set Ctrl+C handler");
-    }
-
-    // Hotkey control channel
-    let tx1 = ctrl_tx.clone();
-
-    // rdev listens on a blocking loop; run it in a thread
-    thread::spawn(move || {
-        use rdev::{EventType, Key};
-
-        // Platform-specific modifier key
-        #[cfg(target_os = "macos")]
-        const MODIFIER_KEY: Key = Key::MetaRight;
-        #[cfg(not(target_os = "macos"))]
-        const MODIFIER_KEY: Key = Key::AltGr;
-
-        // Track modifier key for combination detection
-        let mut modifier_pressed = false;
-        let mut quote_combo_active = false;
-
-        let callback = move |event: rdev::Event| {
-            match event.event_type {
-                EventType::KeyPress(key) if key == MODIFIER_KEY => {
-                    modifier_pressed = true;
-                    let _ = tx1.send(ControlMsg::SinglePress);
-                }
-                EventType::KeyRelease(key) if key == MODIFIER_KEY => {
-                    modifier_pressed = false;
-                    let _ = tx1.send(ControlMsg::StopHold);
-                }
-                EventType::KeyPress(Key::Quote) => {
-                    if modifier_pressed {
-                        quote_combo_active = true;
-                    }
-                }
-                EventType::KeyRelease(Key::Quote) => {
-                    if quote_combo_active {
-                        // Trigger when quote is released while combo was active
-                        // Works regardless of whether modifier is still held
-                        quote_combo_active = false;
-                        let _ = tx1.send(ControlMsg::TypeLastTranscription);
-                    }
-                }
-                EventType::KeyPress(Key::Space) => {
-                    let _ = tx1.send(ControlMsg::SwitchToLatch);
-                }
-                _ => {}
-            }
-        };
-
-        if let Err(e) = rdev::listen(callback) {
-            eprintln!("Global hotkey listener error: {:?}", e);
+impl App {
+    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+        Self {
+            audio_manager: AudioManager::new(),
+            overlay: None,
+            overlay_window_id: None,
+            proxy,
         }
-    });
+    }
 
-    // Main thread: handle control messages and operate the audio manager
-    loop {
-        match ctrl_rx.recv() {
-            Ok(ControlMsg::StopHold) => {
-                if audio_manager.recorder.is_recording()
-                    && audio_manager.mode == RecordingMode::Hold
-                    && let Err(e) = audio_manager.stop_recording()
+    fn handle_control(&mut self, event_loop: &ActiveEventLoop, msg: ControlMsg) {
+        match msg {
+            ControlMsg::StopHold => {
+                if self.audio_manager.recorder.is_recording()
+                    && self.audio_manager.mode == RecordingMode::Hold
+                    && let Err(e) = self.audio_manager.stop_recording(self.proxy.clone())
                 {
                     eprintln!("Failed to stop recording: {}", e);
                 }
             }
-            Ok(ControlMsg::SinglePress) => {
-                if audio_manager.recorder.is_recording()
-                    && audio_manager.mode == RecordingMode::Latch
+            ControlMsg::SinglePress => {
+                if self.audio_manager.recorder.is_recording()
+                    && self.audio_manager.mode == RecordingMode::Latch
                 {
-                    if let Err(e) = audio_manager.stop_recording() {
+                    if let Err(e) = self.audio_manager.stop_recording(self.proxy.clone()) {
                         eprintln!("Failed to stop recording: {}", e);
                     }
-                } else if !audio_manager.recorder.is_recording()
-                    && let Err(e) = audio_manager.start_recording(RecordingMode::Hold)
+                } else if !self.audio_manager.recorder.is_recording()
+                    && let Err(e) = self.audio_manager.start_recording(RecordingMode::Hold)
                 {
                     eprintln!("Failed to start hold recording: {}", e);
+                } else {
+                    let _ = self
+                        .proxy
+                        .send_event(AppEvent::Overlay(OverlayState::Recording));
                 }
             }
-            Ok(ControlMsg::SwitchToLatch) => {
-                if let Err(e) = audio_manager.switch_to_latch_mode() {
-                    eprintln!("Failed to switch to latch mode: {}", e);
+            ControlMsg::SwitchToLatch => match self.audio_manager.switch_to_latch_mode() {
+                Ok(true) => {
+                    let _ = self
+                        .proxy
+                        .send_event(AppEvent::Overlay(OverlayState::RecordingLatch));
                 }
-            }
-            Ok(ControlMsg::TypeLastTranscription) => {
+                Ok(false) => {}
+                Err(e) => eprintln!("Failed to switch to latch mode: {}", e),
+            },
+            ControlMsg::TypeLastTranscription => {
                 let last_transcription_arc =
                     LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
                 if let Ok(last_transcription) = last_transcription_arc.lock() {
@@ -842,18 +805,142 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Ok(ControlMsg::Quit) => {
-                // Gracefully stop if recording, then exit
-                if audio_manager.recorder.is_recording()
-                    && let Err(e) = audio_manager.stop_recording()
+            ControlMsg::Quit => {
+                if self.audio_manager.recorder.is_recording()
+                    && let Err(e) = self.audio_manager.stop_recording(self.proxy.clone())
                 {
                     eprintln!("Failed to stop recording: {}", e);
                 }
-                break;
+                let _ = self
+                    .proxy
+                    .send_event(AppEvent::Overlay(OverlayState::Hidden));
+                event_loop.exit();
             }
-            Err(_) => break,
+        }
+    }
+}
+
+impl ApplicationHandler<AppEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.overlay.is_none() {
+            match OverlayController::new(event_loop) {
+                Ok(overlay) => {
+                    self.overlay_window_id = Some(overlay.window_id());
+                    self.overlay = Some(overlay);
+                }
+                Err(e) => eprintln!("Overlay initialization failed: {}", e),
+            }
         }
     }
 
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::Control(msg) => self.handle_control(event_loop, msg),
+            AppEvent::Overlay(state) => {
+                if let Some(overlay) = self.overlay.as_mut()
+                    && let Err(e) = overlay.update_state(event_loop, state)
+                {
+                    eprintln!("Overlay update failed: {e}");
+                }
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if Some(window_id) != self.overlay_window_id {
+            return;
+        }
+
+        if let Some(overlay) = self.overlay.as_mut() {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(size) => overlay.handle_resize(size),
+                WindowEvent::RedrawRequested => {
+                    if let Err(e) = overlay.redraw() {
+                        eprintln!("Overlay redraw failed: {}", e);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+}
+
+fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
+    thread::spawn(move || {
+        use rdev::{EventType, Key, set_is_main_thread};
+
+        set_is_main_thread(false);
+
+        let mut modifier_pressed = false;
+        let mut quote_combo_active = false;
+
+        let callback = move |event: rdev::Event| match event.event_type {
+            EventType::KeyPress(Key::MetaRight) => {
+                modifier_pressed = true;
+                let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
+            }
+            EventType::KeyRelease(Key::MetaRight) => {
+                modifier_pressed = false;
+                let _ = proxy.send_event(AppEvent::Control(ControlMsg::StopHold));
+            }
+            EventType::KeyPress(Key::Quote) => {
+                if modifier_pressed {
+                    quote_combo_active = true;
+                }
+            }
+            EventType::KeyRelease(Key::Quote) => {
+                if quote_combo_active {
+                    quote_combo_active = false;
+                    let _ = proxy.send_event(AppEvent::Control(ControlMsg::TypeLastTranscription));
+                }
+            }
+            EventType::KeyPress(Key::Space) => {
+                let _ = proxy.send_event(AppEvent::Control(ControlMsg::SwitchToLatch));
+            }
+            _ => {}
+        };
+
+        if let Err(e) = rdev::listen(callback) {
+            eprintln!("Global hotkey listener error: {:?}", e);
+        }
+    });
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Groq Whisper Speech-to-Text");
+    println!("Recording modes:");
+    println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
+    println!(
+        "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop"
+    );
+    println!("Other hotkeys:");
+    println!("  Right Cmd+' : Retype last transcription");
+    println!("Waiting for hotkey...");
+
+    let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = event_loop.create_proxy();
+
+    {
+        let quit_proxy = proxy.clone();
+        ctrlc::set_handler(move || {
+            let _ = quit_proxy.send_event(AppEvent::Control(ControlMsg::Quit));
+        })
+        .expect("failed to set Ctrl+C handler");
+    }
+
+    spawn_hotkey_listener(proxy.clone());
+
+    let mut app = App::new(proxy);
+    event_loop.run_app(&mut app)?;
     Ok(())
 }

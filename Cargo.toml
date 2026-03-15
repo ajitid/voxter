@@ -12,8 +12,18 @@ cpal = "0.15"
 opus = "0.3"
 ogg = "0.9"
 flume = "0.11"
-rdev = "0.5"
+rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2" }
 enigo = "0.6"
 ctrlc = "3"
 rodio = { version = "0.21.1" }
 voice_activity_detector = "0.2.1"
+winit = "0.30.13"
+wgpu = "28.0.0"
+pollster = "0.4"
+raqote = "0.8.5"
+font-kit = "0.14"
+bytemuck = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24.0"
+
