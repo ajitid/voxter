@@ -373,7 +373,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
 
     fn letter_spacing_px(point_size: f32) -> f32 {
         // Slight tracking to improve readability for all-caps status labels.
-        (point_size * 0.05).round()
+        (point_size * 0.065).round()
     }
 
     fn measure_text_width(&self, text: &str, point_size: f32) -> f32 {
@@ -491,7 +491,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
             y,
             point_size,
             SolidSource::from_unpremultiplied_argb(255, 255, 255, 255),
-            SolidSource::from_unpremultiplied_argb(255, 32, 32, 32),
+            SolidSource::from_unpremultiplied_argb(255, 55, 55, 55),
             outline_px,
         );
 
