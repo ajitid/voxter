@@ -406,6 +406,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         }
     }
 
+    fn draw_text_with_outline(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        point_size: f32,
+        fill: SolidSource,
+        outline: SolidSource,
+        outline_px: i32,
+    ) {
+        if outline_px > 0 {
+            for dy in -outline_px..=outline_px {
+                for dx in -outline_px..=outline_px {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    self.draw_text(text, x + dx as f32, y + dy as f32, point_size, outline);
+                }
+            }
+        }
+
+        self.draw_text(text, x, y, point_size, fill);
+    }
+
     pub fn draw_frame(&mut self, state: OverlayState, now: Instant, started_at: Instant) {
         let _elapsed = now.saturating_duration_since(started_at).as_secs_f32();
 
@@ -420,12 +444,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         let approx_width = label.chars().count() as f32 * point_size * 0.52;
         let x = ((width - approx_width) / 2.0).max(8.0);
         let y = (height * 0.58).max(point_size + 2.0);
-        self.draw_text(
+        let outline_px = ((point_size * 0.08).round() as i32).clamp(1, 3);
+        self.draw_text_with_outline(
             label,
             x,
             y,
             point_size,
             SolidSource::from_unpremultiplied_argb(255, 255, 255, 255),
+            SolidSource::from_unpremultiplied_argb(255, 0, 0, 0),
+            outline_px,
         );
 
         let bytes = self.dt.get_data_u8();
