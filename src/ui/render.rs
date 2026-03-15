@@ -371,16 +371,55 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         }
     }
 
+    fn letter_spacing_px(point_size: f32) -> f32 {
+        // Slight tracking to improve readability for all-caps status labels.
+        (point_size * 0.05).round()
+    }
+
+    fn measure_text_width(&self, text: &str, point_size: f32) -> f32 {
+        let units_per_em = self.font.metrics().units_per_em.max(1) as f32;
+        let advance_scale = point_size / units_per_em;
+        let letter_spacing = Self::letter_spacing_px(point_size);
+
+        let mut width = 0.0;
+        let mut visible_count = 0usize;
+
+        for ch in text.chars() {
+            if let Some(id) = self.font.glyph_for_char(ch) {
+                let adv_px = self
+                    .font
+                    .advance(id)
+                    .map(|adv| adv.x() * advance_scale)
+                    .unwrap_or(point_size * 0.5);
+                width += adv_px;
+                visible_count += 1;
+            } else if ch == ' ' {
+                width += point_size * 0.35;
+            }
+        }
+
+        if visible_count > 1 {
+            width += letter_spacing * (visible_count as f32 - 1.0);
+        }
+
+        width
+    }
+
     fn draw_text(&mut self, text: &str, x: f32, y: f32, point_size: f32, color: SolidSource) {
         let units_per_em = self.font.metrics().units_per_em.max(1) as f32;
         let advance_scale = point_size / units_per_em;
+        let letter_spacing = Self::letter_spacing_px(point_size);
 
         let mut glyph_ids = Vec::with_capacity(text.chars().count());
         let mut positions = Vec::with_capacity(text.chars().count());
 
         let mut pen_x = x;
+        let mut seen_glyph = false;
         for ch in text.chars() {
             if let Some(id) = self.font.glyph_for_char(ch) {
+                if seen_glyph {
+                    pen_x += letter_spacing;
+                }
                 positions.push(Point::new(pen_x.round(), y.round()));
                 let adv_px = self
                     .font
@@ -389,6 +428,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
                     .unwrap_or(point_size * 0.5);
                 glyph_ids.push(id);
                 pen_x += adv_px;
+                seen_glyph = true;
             } else if ch == ' ' {
                 pen_x += point_size * 0.35;
             }
@@ -441,7 +481,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
 
         let label = Self::state_label(state);
         let point_size = (((height * 0.45) + 8.0).clamp(24.0, 50.0)).round();
-        let approx_width = label.chars().count() as f32 * point_size * 0.52;
+        let approx_width = self.measure_text_width(label, point_size);
         let x = ((width - approx_width) / 2.0).max(8.0);
         let y = (height * 0.58).max(point_size + 2.0);
         let outline_px = ((point_size * 0.08).round() as i32).clamp(1, 3);
