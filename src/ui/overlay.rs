@@ -1,3 +1,4 @@
+use crate::SpeechVizState;
 use crate::ui::render::OverlayRenderer;
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,7 +26,10 @@ pub struct OverlayController {
 }
 
 impl OverlayController {
-    pub fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        speech_viz: Arc<SpeechVizState>,
+    ) -> Result<Self, String> {
         let mut attrs = Window::default_attributes()
             .with_title("voxtral overlay")
             .with_visible(false)
@@ -56,7 +60,7 @@ impl OverlayController {
             eprintln!("Failed to enable click-through overlay: {e}");
         }
 
-        let renderer = OverlayRenderer::new(&window)?;
+        let renderer = OverlayRenderer::new(&window, speech_viz)?;
 
         Ok(Self {
             window,
@@ -68,6 +72,10 @@ impl OverlayController {
 
     pub fn window_id(&self) -> winit::window::WindowId {
         self.window.id()
+    }
+
+    pub fn window(&self) -> &Window {
+        self.window.as_ref()
     }
 
     pub fn is_visible(&self) -> bool {
@@ -109,8 +117,8 @@ impl OverlayController {
         Ok(())
     }
 
-    pub fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.renderer.resize(new_size);
+    pub fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>, scale_factor: f64) {
+        self.renderer.resize(new_size, scale_factor);
         if self.is_visible() {
             self.window.request_redraw();
         }
@@ -151,7 +159,7 @@ impl OverlayController {
         let window_size = self.window.outer_size();
 
         let x = monitor_pos.x + ((monitor_size.width as i32 - window_size.width as i32) / 2);
-        let y = monitor_pos.y + (monitor_size.height as i32 - window_size.height as i32 - 36);
+        let y = monitor_pos.y + (monitor_size.height as i32 - window_size.height as i32);
 
         self.window
             .set_outer_position(Position::Physical(PhysicalPosition::new(x, y)));

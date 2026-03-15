@@ -1,13 +1,15 @@
+use crate::SpeechVizState;
 use crate::ui::overlay::OverlayState;
 use bytemuck::{Pod, Zeroable};
-use font_kit::font::Font;
-use raqote::{DrawOptions, DrawTarget, Point, SolidSource, Source};
-use std::fs::File;
+use raqote::{
+    BlendMode, Color, DrawOptions, DrawTarget, Gradient, GradientStop, LineCap, PathBuilder, Point,
+    SolidSource, Source, Spread, StrokeStyle,
+};
 use std::mem;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::window::Window;
 
 #[repr(C)]
@@ -57,13 +59,19 @@ pub struct OverlayRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     dt: DrawTarget,
-    font: Font,
-    size: PhysicalSize<u32>,
+    physical_size: PhysicalSize<u32>,
+    logical_size: LogicalSize<f32>,
+    scale_factor: f64,
+    speech_viz: Arc<SpeechVizState>,
+    last_state: OverlayState,
+    state_started_at: Instant,
 }
 
 impl OverlayRenderer {
-    pub fn new(window: &Arc<Window>) -> Result<Self, String> {
-        let size = window.inner_size();
+    pub fn new(window: &Arc<Window>, speech_viz: Arc<SpeechVizState>) -> Result<Self, String> {
+        let physical_size = window.inner_size();
+        let scale_factor = window.scale_factor();
+        let logical_size = physical_size.to_logical::<f32>(scale_factor);
 
         let instance = wgpu::Instance::default();
         let surface_target = unsafe { wgpu::SurfaceTargetUnsafe::from_window(window.as_ref()) }
@@ -128,8 +136,8 @@ impl OverlayRenderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: physical_size.width.max(1),
+            height: physical_size.height.max(1),
             present_mode,
             alpha_mode,
             view_formats: vec![],
@@ -258,14 +266,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         });
 
         let (texture, texture_view, sampler, bind_group) =
-            Self::create_texture_resources(&device, &bind_group_layout, size)?;
+            Self::create_texture_resources(&device, &bind_group_layout, physical_size)?;
 
-        let mut font_file = File::open("assets/dotty.ttf")
-            .map_err(|e| format!("Failed to open assets/dotty.ttf: {e}"))?;
-        let font = font_kit::loader::Loader::from_file(&mut font_file, 0)
-            .map_err(|e| format!("Failed to load dotty font: {e}"))?;
-
-        let dt = DrawTarget::new(size.width as i32, size.height as i32);
+        let dt = DrawTarget::new(physical_size.width as i32, physical_size.height as i32);
 
         Ok(Self {
             surface,
@@ -280,8 +283,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
             bind_group_layout,
             bind_group,
             dt,
-            font,
-            size,
+            physical_size,
+            logical_size,
+            scale_factor,
+            speech_viz,
+            last_state: OverlayState::Hidden,
+            state_started_at: Instant::now(),
         })
     }
 
@@ -342,158 +349,256 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         Ok((texture, texture_view, sampler, bind_group))
     }
 
-    pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
+    pub fn resize(&mut self, physical_size: PhysicalSize<u32>, scale_factor: f64) {
+        if physical_size.width == 0 || physical_size.height == 0 {
             return;
         }
 
-        self.size = size;
-        self.config.width = size.width;
-        self.config.height = size.height;
+        self.physical_size = physical_size;
+        self.scale_factor = scale_factor;
+        self.logical_size = physical_size.to_logical::<f32>(scale_factor);
+
+        self.config.width = physical_size.width;
+        self.config.height = physical_size.height;
         self.surface.configure(&self.device, &self.config);
 
         let (texture, texture_view, sampler, bind_group) =
-            Self::create_texture_resources(&self.device, &self.bind_group_layout, size)
+            Self::create_texture_resources(&self.device, &self.bind_group_layout, physical_size)
                 .expect("Failed to recreate texture resources");
         self.texture = texture;
         self.texture_view = texture_view;
         self.sampler = sampler;
         self.bind_group = bind_group;
-        self.dt = DrawTarget::new(size.width as i32, size.height as i32);
+        self.dt = DrawTarget::new(physical_size.width as i32, physical_size.height as i32);
     }
 
-    fn state_label(state: OverlayState) -> &'static str {
-        match state {
-            OverlayState::Hidden => "",
-            OverlayState::Recording => "recording",
-            OverlayState::RecordingLatch => "recording (latch)",
-            OverlayState::Transcribing => "transcribing",
+    fn draw_polyline_source(&mut self, points: &[Point], width: f32, source: &Source<'_>) {
+        if points.len() < 2 {
+            return;
+        }
+
+        let mut pb = PathBuilder::new();
+        pb.move_to(points[0].x, points[0].y);
+        for point in &points[1..] {
+            pb.line_to(point.x, point.y);
+        }
+        let path = pb.finish();
+
+        self.dt.stroke(
+            &path,
+            source,
+            &StrokeStyle {
+                width: width.max(0.8),
+                cap: LineCap::Round,
+                ..StrokeStyle::default()
+            },
+            &DrawOptions::new(),
+        );
+    }
+
+    fn soft_premium_gradient(alpha_mult: f32) -> Gradient {
+        let a = ((235.0 * alpha_mult.clamp(0.0, 1.0)).round()).clamp(0.0, 255.0) as u8;
+        Gradient {
+            stops: vec![
+                GradientStop {
+                    position: 0.0,
+                    color: Color::new(a, 0xFF, 0x4D, 0x4D), // red
+                },
+                GradientStop {
+                    position: 0.5,
+                    color: Color::new(a, 0xFF, 0x9F, 0x43), // orange
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: Color::new(a, 0xFF, 0x5F, 0xA2), // pink
+                },
+            ],
         }
     }
 
-    fn letter_spacing_px(point_size: f32) -> f32 {
-        // Slight tracking to improve readability for all-caps status labels.
-        (point_size * 0.065).round()
+    fn arc_gradient_source(left_x: f32, right_x: f32, y: f32, alpha_mult: f32) -> Source<'static> {
+        Source::new_linear_gradient(
+            Self::soft_premium_gradient(alpha_mult),
+            Point::new(left_x, y),
+            Point::new(right_x, y),
+            Spread::Pad,
+        )
     }
 
-    fn measure_text_width(&self, text: &str, point_size: f32) -> f32 {
-        let units_per_em = self.font.metrics().units_per_em.max(1) as f32;
-        let advance_scale = point_size / units_per_em;
-        let letter_spacing = Self::letter_spacing_px(point_size);
-
-        let mut width = 0.0;
-        let mut visible_count = 0usize;
-
-        for ch in text.chars() {
-            if let Some(id) = self.font.glyph_for_char(ch) {
-                let adv_px = self
-                    .font
-                    .advance(id)
-                    .map(|adv| adv.x() * advance_scale)
-                    .unwrap_or(point_size * 0.5);
-                width += adv_px;
-                visible_count += 1;
-            } else if ch == ' ' {
-                width += point_size * 0.35;
-            }
-        }
-
-        if visible_count > 1 {
-            width += letter_spacing * (visible_count as f32 - 1.0);
-        }
-
-        width
+    fn spinner_flat_source(alpha_mult: f32) -> Source<'static> {
+        let a = ((235.0 * alpha_mult.clamp(0.0, 1.0)).round()).clamp(0.0, 255.0) as u8;
+        Source::Solid(SolidSource::from_unpremultiplied_argb(a, 0xFF, 0x4D, 0x4D))
     }
 
-    fn draw_text(&mut self, text: &str, x: f32, y: f32, point_size: f32, color: SolidSource) {
-        let units_per_em = self.font.metrics().units_per_em.max(1) as f32;
-        let advance_scale = point_size / units_per_em;
-        let letter_spacing = Self::letter_spacing_px(point_size);
+    fn draw_latch_lock_icon(&mut self, center: Point) {
+        let lock_pink = SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x5F, 0xA2);
 
-        let mut glyph_ids = Vec::with_capacity(text.chars().count());
-        let mut positions = Vec::with_capacity(text.chars().count());
+        let body_w = 9.8;
+        let body_h = 8.0;
+        let body_left = center.x - (body_w * 0.5);
+        let body_top = center.y - 0.7;
 
-        let mut pen_x = x;
-        let mut seen_glyph = false;
-        for ch in text.chars() {
-            if let Some(id) = self.font.glyph_for_char(ch) {
-                if seen_glyph {
-                    pen_x += letter_spacing;
-                }
-                positions.push(Point::new(pen_x.round(), y.round()));
-                let adv_px = self
-                    .font
-                    .advance(id)
-                    .map(|adv| adv.x() * advance_scale)
-                    .unwrap_or(point_size * 0.5);
-                glyph_ids.push(id);
-                pen_x += adv_px;
-                seen_glyph = true;
-            } else if ch == ' ' {
-                pen_x += point_size * 0.35;
-            }
-        }
+        let mut body_pb = PathBuilder::new();
+        body_pb.rect(body_left, body_top, body_w, body_h);
+        let body_path = body_pb.finish();
+        self.dt
+            .fill(&body_path, &Source::Solid(lock_pink), &DrawOptions::new());
 
-        if !glyph_ids.is_empty() {
-            self.dt.draw_glyphs(
-                &self.font,
-                point_size,
-                &glyph_ids,
-                &positions,
-                &Source::Solid(color),
-                &DrawOptions::new(),
-            );
-        }
+        let mut shackle_pb = PathBuilder::new();
+        shackle_pb.arc(
+            center.x,
+            body_top + 0.6,
+            3.5,
+            std::f32::consts::PI,
+            std::f32::consts::PI,
+        );
+        let shackle_path = shackle_pb.finish();
+        self.dt.stroke(
+            &shackle_path,
+            &Source::Solid(lock_pink),
+            &StrokeStyle {
+                width: 2.0,
+                cap: LineCap::Round,
+                ..StrokeStyle::default()
+            },
+            &DrawOptions::new(),
+        );
+
+        let mut keyhole_pb = PathBuilder::new();
+        keyhole_pb.arc(center.x, body_top + 3.2, 1.0, 0.0, std::f32::consts::TAU);
+        keyhole_pb.rect(center.x - 0.55, body_top + 3.8, 1.1, 1.9);
+        let keyhole_path = keyhole_pb.finish();
+        self.dt.fill(
+            &keyhole_path,
+            &Source::Solid(SolidSource::from_unpremultiplied_argb(255, 0, 0, 0)),
+            &DrawOptions {
+                blend_mode: BlendMode::Clear,
+                ..DrawOptions::new()
+            },
+        );
     }
 
-    fn draw_text_with_outline(
-        &mut self,
-        text: &str,
-        x: f32,
-        y: f32,
-        point_size: f32,
-        fill: SolidSource,
-        outline: SolidSource,
-        outline_px: i32,
-    ) {
-        if outline_px > 0 {
-            for dy in -outline_px..=outline_px {
-                for dx in -outline_px..=outline_px {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    self.draw_text(text, x + dx as f32, y + dy as f32, point_size, outline);
-                }
-            }
-        }
+    fn arc_points_from_sagitta(
+        cx: f32,
+        y_base: f32,
+        half_chord: f32,
+        sagitta: f32,
+        samples: usize,
+    ) -> Vec<Point> {
+        let s = sagitta.max(0.5);
+        let a = half_chord.max(1.0);
+        let radius = ((a * a) + (s * s)) / (2.0 * s);
+        let cy = y_base + (radius - s);
 
-        self.draw_text(text, x, y, point_size, fill);
+        let mut points = Vec::with_capacity(samples + 1);
+        for i in 0..=samples {
+            let t = i as f32 / samples as f32;
+            let x = cx - a + (2.0 * a * t);
+            let dx = x - cx;
+            let y = cy - ((radius * radius - dx * dx).max(0.0)).sqrt();
+            points.push(Point::new(x, y));
+        }
+        points
     }
 
-    pub fn draw_frame(&mut self, state: OverlayState, now: Instant, started_at: Instant) {
-        let _elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+    fn spinner_points(
+        center: Point,
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+        samples: usize,
+    ) -> Vec<Point> {
+        let mut points = Vec::with_capacity(samples + 1);
+        let r = radius.max(1.0);
+        for i in 0..=samples {
+            let t = i as f32 / samples as f32;
+            let angle = start_angle + (sweep_angle * t);
+            let x = center.x + (r * angle.cos());
+            let y = center.y + (r * angle.sin());
+            points.push(Point::new(x, y));
+        }
+        points
+    }
 
-        let width = self.size.width.max(1) as f32;
-        let height = self.size.height.max(1) as f32;
+    pub fn draw_frame(&mut self, state: OverlayState, now: Instant, _started_at: Instant) {
+        let width = self.logical_size.width.max(1.0);
+        let height = self.logical_size.height.max(1.0);
 
         self.dt
             .clear(SolidSource::from_unpremultiplied_argb(0, 0, 0, 0));
+        self.dt.set_transform(&raqote::Transform::scale(
+            self.scale_factor as f32,
+            self.scale_factor as f32,
+        ));
 
-        let label = Self::state_label(state);
-        let point_size = (((height * 0.45) + 8.0).clamp(24.0, 50.0)).round();
-        let approx_width = self.measure_text_width(label, point_size);
-        let x = ((width - approx_width) / 2.0).max(8.0);
-        let y = (height * 0.58).max(point_size + 2.0);
-        let outline_px = ((point_size * 0.08).round() as i32).clamp(1, 3);
-        self.draw_text_with_outline(
-            label,
-            x,
-            y,
-            point_size,
-            SolidSource::from_unpremultiplied_argb(255, 255, 255, 255),
-            SolidSource::from_unpremultiplied_argb(255, 55, 55, 55),
-            outline_px,
-        );
+        if state != self.last_state {
+            self.last_state = state;
+            self.state_started_at = now;
+        }
+
+        let state_elapsed = now
+            .saturating_duration_since(self.state_started_at)
+            .as_secs_f32();
+
+        let live_speech_energy = if self.speech_viz.is_active() {
+            self.speech_viz.level()
+        } else {
+            0.0
+        }
+        .clamp(0.0, 1.0);
+        let display_energy = live_speech_energy.powf(0.72);
+
+        let cx = width * 0.5;
+        let half_chord = (width * 0.26)
+            .min(width * 0.42)
+            .max((width * 0.18).max(48.0));
+        let y_base = height - 14.0;
+        let sagitta_min = 1.8;
+        let sagitta_range = height * 0.42;
+        let sample_count = 56usize;
+
+        let stroke_width = 3.8;
+
+        match state {
+            OverlayState::Recording | OverlayState::RecordingLatch => {
+                let sagitta = sagitta_min + (display_energy * sagitta_range);
+                let arc_points =
+                    Self::arc_points_from_sagitta(cx, y_base, half_chord, sagitta, sample_count);
+                let arc_source =
+                    Self::arc_gradient_source(cx - half_chord, cx + half_chord, y_base, 1.0);
+                self.draw_polyline_source(&arc_points, stroke_width, &arc_source);
+
+                if matches!(state, OverlayState::RecordingLatch) {
+                    const LOCK_ICON_GAP_FROM_ARC_END: f32 = 20.0;
+                    const LOCK_ICON_MIN_MARGIN_RIGHT: f32 = 22.0;
+                    const LOCK_ICON_BASELINE_OFFSET: f32 = 4.5;
+                    let lock_x = (cx + half_chord + LOCK_ICON_GAP_FROM_ARC_END)
+                        .min(width - LOCK_ICON_MIN_MARGIN_RIGHT);
+                    let lock_center = Point::new(lock_x, y_base - LOCK_ICON_BASELINE_OFFSET);
+                    self.draw_latch_lock_icon(lock_center);
+                }
+            }
+            OverlayState::Transcribing => {
+                let spinner_center = Point::new(cx, y_base - (height * 0.23).clamp(18.0, 26.0));
+                let spinner_radius = (height * 0.18).clamp(14.0, 20.0);
+                let spinner_sweep = 124.0_f32.to_radians();
+                let spinner_angle =
+                    (std::f32::consts::TAU * 2.2 * state_elapsed) - std::f32::consts::FRAC_PI_2;
+                let spinner_points = Self::spinner_points(
+                    spinner_center,
+                    spinner_radius,
+                    spinner_angle - (spinner_sweep * 0.5),
+                    spinner_sweep,
+                    sample_count,
+                );
+
+                let spinner_source = Self::spinner_flat_source(1.0);
+                self.draw_polyline_source(&spinner_points, stroke_width, &spinner_source);
+            }
+            OverlayState::Hidden => {}
+        }
+
+        self.dt.set_transform(&raqote::Transform::identity());
 
         let bytes = self.dt.get_data_u8();
         self.queue.write_texture(
@@ -506,12 +611,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
             bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * self.size.width.max(1)),
-                rows_per_image: Some(self.size.height.max(1)),
+                bytes_per_row: Some(4 * self.physical_size.width.max(1)),
+                rows_per_image: Some(self.physical_size.height.max(1)),
             },
             wgpu::Extent3d {
-                width: self.size.width.max(1),
-                height: self.size.height.max(1),
+                width: self.physical_size.width.max(1),
+                height: self.physical_size.height.max(1),
                 depth_or_array_layers: 1,
             },
         );

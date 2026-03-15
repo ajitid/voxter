@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
 use ui::overlay::{OverlayController, OverlayState};
@@ -87,10 +88,52 @@ enum AppEvent {
     Overlay(OverlayState),
 }
 
+pub(crate) struct SpeechVizState {
+    rms_norm_bits: AtomicU32,
+    active: AtomicBool,
+}
+
+impl SpeechVizState {
+    fn new() -> Self {
+        Self {
+            rms_norm_bits: AtomicU32::new(0.0f32.to_bits()),
+            active: AtomicBool::new(false),
+        }
+    }
+
+    fn set_level(&self, value: f32) {
+        let clamped = value.clamp(0.0, 1.0);
+        self.rms_norm_bits
+            .store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn level(&self) -> f32 {
+        f32::from_bits(self.rms_norm_bits.load(Ordering::Relaxed))
+    }
+
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    fn deactivate(&self) {
+        self.set_active(false);
+    }
+
+    fn reset(&self) {
+        self.set_level(0.0);
+        self.set_active(false);
+    }
+}
+
 struct AudioManager {
     recorder: AudioRecorder,
     current_stream: Option<cpal::Stream>,
     mode: RecordingMode,
+    speech_viz: Arc<SpeechVizState>,
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -197,6 +240,7 @@ impl AudioManager {
             recorder: AudioRecorder::new(),
             current_stream: None,
             mode: RecordingMode::Hold,
+            speech_viz: Arc::new(SpeechVizState::new()),
         }
     }
 
@@ -208,6 +252,8 @@ impl AudioManager {
         self.mode = mode;
         self.recorder.configure_from_device()?;
         self.recorder.prepare_recording()?;
+        self.speech_viz.set_active(true);
+        self.speech_viz.set_level(0.0);
 
         /*
         Not only audio-out systems take time to wake up from sleep, but audio-in systems (like mic) take time to wake up as well.
@@ -242,52 +288,204 @@ impl AudioManager {
             .map_err(|e| format!("Failed to get input config: {}", e))?;
 
         let tx_arc = Arc::clone(&self.recorder.tx);
+        let speech_viz = Arc::clone(&self.speech_viz);
+
+        const RMS_GAIN: f32 = 4.8;
+        const RMS_GAMMA: f32 = 0.52;
+        const ATTACK_ALPHA: f32 = 0.40;
+        const RELEASE_ALPHA: f32 = 0.16;
+
+        const VIS_ATTACK_ALPHA: f32 = 0.50;
+        const VIS_RELEASE_ALPHA: f32 = 0.22;
+        const GATE_SMOOTH_ALPHA: f32 = 0.14;
+        const VIS_NOISE_DEADZONE: f32 = 0.055;
+
+        const LIVE_VAD_SAMPLE_RATE: f32 = 16_000.0;
+        const LIVE_VAD_CHUNK_SIZE: usize = 512;
+        const VAD_SMOOTH_ALPHA: f32 = 0.24;
+        const VAD_ENTER_THRESHOLD: f32 = 0.42;
+        const VAD_EXIT_THRESHOLD: f32 = 0.30;
+
+        let mut live_vad = match VoiceActivityDetector::builder()
+            .sample_rate(16_000)
+            .chunk_size(LIVE_VAD_CHUNK_SIZE)
+            .build()
+        {
+            Ok(vad) => Some(vad),
+            Err(e) => {
+                eprintln!("Live VAD init failed (falling back to RMS-only): {e}");
+                None
+            }
+        };
+
+        let input_sample_rate = config.sample_rate().0 as f32;
+        let vad_resample_step = (input_sample_rate / LIVE_VAD_SAMPLE_RATE).max(0.01);
 
         let channels_cfg = config.channels() as usize;
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => device
-                .build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        // Downmix to mono if needed and convert to i16
-                        let chunk: Vec<i16> = if channels_cfg > 1 {
-                            let frames = data.len() / channels_cfg;
-                            let mut mono = Vec::with_capacity(frames);
-                            for i in 0..frames {
-                                let mut acc = 0.0f32;
-                                let base = i * channels_cfg;
-                                for c in 0..channels_cfg {
-                                    acc += data[base + c];
+            cpal::SampleFormat::F32 => {
+                let mut smoothed_level = 0.0f32;
+                let mut final_visual_level = 0.0f32;
+                let mut vad_gate_smoothed = 1.0f32;
+                let mut snr_gate_smoothed = 1.0f32;
+                let mut vad_buffer = Vec::<f32>::with_capacity(LIVE_VAD_CHUNK_SIZE * 3);
+                let mut resample_phase = 0.0f32;
+                let mut speech_conf = 0.0f32;
+                let mut in_speech = false;
+                let mut noise_floor = 0.0035f32;
+                device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            // Downmix to mono if needed and convert to i16
+                            let chunk: Vec<i16> = if channels_cfg > 1 {
+                                let frames = data.len() / channels_cfg;
+                                let mut mono = Vec::with_capacity(frames);
+                                for i in 0..frames {
+                                    let mut acc = 0.0f32;
+                                    let base = i * channels_cfg;
+                                    for c in 0..channels_cfg {
+                                        acc += data[base + c];
+                                    }
+                                    let avg = acc / (channels_cfg as f32);
+                                    let clamped = avg.clamp(-1.0, 1.0);
+                                    mono.push((clamped * (i16::MAX as f32)) as i16);
                                 }
-                                let avg = acc / (channels_cfg as f32);
-                                let clamped = avg.clamp(-1.0, 1.0);
-                                mono.push((clamped * (i16::MAX as f32)) as i16);
+                                mono
+                            } else {
+                                let mut mono = Vec::with_capacity(data.len());
+                                for &s in data {
+                                    let clamped = s.clamp(-1.0, 1.0);
+                                    mono.push((clamped * (i16::MAX as f32)) as i16);
+                                }
+                                mono
+                            };
+
+                            if !chunk.is_empty() {
+                                let sum_sq: f32 = chunk
+                                    .iter()
+                                    .map(|&s| {
+                                        let x = s as f32 / 32768.0;
+                                        x * x
+                                    })
+                                    .sum();
+                                let rms = (sum_sq / chunk.len() as f32).sqrt();
+                                let normalized = (rms * RMS_GAIN).powf(RMS_GAMMA).clamp(0.0, 1.0);
+                                let alpha = if normalized > smoothed_level {
+                                    ATTACK_ALPHA
+                                } else {
+                                    RELEASE_ALPHA
+                                };
+                                smoothed_level += alpha * (normalized - smoothed_level);
+
+                                let live_vad_enabled = live_vad.is_some();
+                                let mut vad_gate = 1.0f32;
+
+                                if let Some(vad) = live_vad.as_mut() {
+                                    let mut idx = resample_phase;
+                                    let chunk_len_f = chunk.len() as f32;
+                                    while idx < chunk_len_f {
+                                        let sample_idx = idx as usize;
+                                        if sample_idx >= chunk.len() {
+                                            break;
+                                        }
+                                        vad_buffer.push(chunk[sample_idx] as f32 / 32768.0);
+                                        idx += vad_resample_step;
+                                    }
+                                    resample_phase = idx - chunk_len_f;
+
+                                    while vad_buffer.len() >= LIVE_VAD_CHUNK_SIZE {
+                                        let frame: Vec<f32> =
+                                            vad_buffer.drain(..LIVE_VAD_CHUNK_SIZE).collect();
+                                        let raw = vad.predict(frame).clamp(0.0, 1.0);
+                                        speech_conf = ((1.0 - VAD_SMOOTH_ALPHA) * speech_conf)
+                                            + (VAD_SMOOTH_ALPHA * raw);
+                                    }
+
+                                    if in_speech {
+                                        if speech_conf < VAD_EXIT_THRESHOLD {
+                                            in_speech = false;
+                                        }
+                                    } else if speech_conf > VAD_ENTER_THRESHOLD {
+                                        in_speech = true;
+                                    }
+
+                                    vad_gate = if in_speech {
+                                        1.0
+                                    } else {
+                                        (speech_conf / VAD_ENTER_THRESHOLD).clamp(0.0, 1.0) * 0.35
+                                    };
+                                }
+
+                                let gated_target = if live_vad_enabled {
+                                    if in_speech {
+                                        noise_floor = (noise_floor * 0.996) + (rms * 0.004);
+                                    } else {
+                                        noise_floor = (noise_floor * 0.94) + (rms * 0.06);
+                                    }
+                                    noise_floor = noise_floor.clamp(0.0008, 0.12);
+
+                                    let noise_ref = (noise_floor * 1.14).max(0.0012);
+                                    let snr_gate =
+                                        ((rms - noise_ref) / (noise_ref * 2.8)).clamp(0.0, 1.0);
+
+                                    vad_gate_smoothed +=
+                                        GATE_SMOOTH_ALPHA * (vad_gate - vad_gate_smoothed);
+                                    snr_gate_smoothed +=
+                                        GATE_SMOOTH_ALPHA * (snr_gate - snr_gate_smoothed);
+
+                                    let blended_gate = if in_speech {
+                                        ((0.72 * vad_gate_smoothed) + (0.28 * snr_gate_smoothed))
+                                            .clamp(0.52, 1.0)
+                                    } else {
+                                        ((0.62 * vad_gate_smoothed) + (0.38 * snr_gate_smoothed))
+                                            .clamp(0.0, 0.55)
+                                    };
+
+                                    (smoothed_level * blended_gate).clamp(0.0, 1.0)
+                                } else {
+                                    smoothed_level
+                                };
+
+                                let gated_target = if in_speech {
+                                    gated_target
+                                } else if gated_target <= VIS_NOISE_DEADZONE {
+                                    0.0
+                                } else {
+                                    (((gated_target - VIS_NOISE_DEADZONE)
+                                        / (1.0 - VIS_NOISE_DEADZONE))
+                                        * 0.85)
+                                        .clamp(0.0, 1.0)
+                                };
+
+                                let vis_alpha = if gated_target > final_visual_level {
+                                    VIS_ATTACK_ALPHA
+                                } else {
+                                    VIS_RELEASE_ALPHA
+                                };
+                                final_visual_level +=
+                                    vis_alpha * (gated_target - final_visual_level);
+                                speech_viz.set_level(final_visual_level.clamp(0.0, 1.0));
                             }
-                            mono
-                        } else {
-                            let mut mono = Vec::with_capacity(data.len());
-                            for &s in data {
-                                let clamped = s.clamp(-1.0, 1.0);
-                                mono.push((clamped * (i16::MAX as f32)) as i16);
+
+                            if let Ok(guard) = tx_arc.lock()
+                                && let Some(tx) = &*guard
+                            {
+                                let _ = tx.try_send(chunk);
                             }
-                            mono
-                        };
-                        if let Ok(guard) = tx_arc.lock()
-                            && let Some(tx) = &*guard
-                        {
-                            let _ = tx.try_send(chunk);
-                        }
-                    },
-                    |err| eprintln!("Audio stream error: {}", err),
-                    None,
-                )
-                .map_err(|e| format!("Failed to build input stream: {}", e))?,
+                        },
+                        |err| eprintln!("Audio stream error: {}", err),
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to build input stream: {}", e))?
+            }
             _ => return Err("Unsupported sample format".into()),
         };
 
-        stream
-            .play()
-            .map_err(|e| format!("Failed to start stream: {}", e))?;
+        if let Err(e) = stream.play() {
+            self.speech_viz.reset();
+            return Err(format!("Failed to start stream: {}", e));
+        }
         self.current_stream = Some(stream);
 
         Ok(())
@@ -295,6 +493,7 @@ impl AudioManager {
 
     fn stop_recording(&mut self, proxy: EventLoopProxy<AppEvent>) -> Result<(), String> {
         if !self.recorder.is_recording() {
+            self.speech_viz.deactivate();
             return Ok(());
         }
 
@@ -330,6 +529,9 @@ impl AudioManager {
                 let _ = proxy.send_event(AppEvent::Overlay(OverlayState::Hidden));
                 return Ok(());
             }
+
+            // During VAD analysis keep overlay hidden; show spinner only if transcription starts.
+            let _ = proxy.send_event(AppEvent::Overlay(OverlayState::Hidden));
 
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
@@ -835,7 +1037,7 @@ impl App {
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.overlay.is_none() {
-            match OverlayController::new(event_loop) {
+            match OverlayController::new(event_loop, Arc::clone(&self.audio_manager.speech_viz)) {
                 Ok(overlay) => {
                     self.overlay_window_id = Some(overlay.window_id());
                     self.overlay = Some(overlay);
@@ -850,6 +1052,9 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::Control(msg) => self.handle_control(event_loop, msg),
             AppEvent::Overlay(state) => {
+                if state == OverlayState::Hidden {
+                    self.audio_manager.speech_viz.reset();
+                }
                 if let Some(overlay) = self.overlay.as_mut()
                     && let Err(e) = overlay.update_state(event_loop, state)
                 {
@@ -873,7 +1078,14 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some(overlay) = self.overlay.as_mut() {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
-                WindowEvent::Resized(size) => overlay.handle_resize(size),
+                WindowEvent::Resized(size) => {
+                    let scale_factor = overlay.window().scale_factor();
+                    overlay.handle_resize(size, scale_factor);
+                }
+                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                    let size = overlay.window().inner_size();
+                    overlay.handle_resize(size, scale_factor);
+                }
                 WindowEvent::RedrawRequested => {
                     if let Err(e) = overlay.redraw() {
                         eprintln!("Overlay redraw failed: {}", e);

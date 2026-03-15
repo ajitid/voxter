@@ -3925,7 +3925,6 @@ dependencies = [
  "dotenvy",
  "enigo",
  "flume",
- "font-kit",
  "ogg",
  "opus",
  "pollster",
