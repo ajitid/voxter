@@ -451,7 +451,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
             y,
             point_size,
             SolidSource::from_unpremultiplied_argb(255, 255, 255, 255),
-            SolidSource::from_unpremultiplied_argb(255, 0, 0, 0),
+            SolidSource::from_unpremultiplied_argb(255, 32, 32, 32),
             outline_px,
         );
 
