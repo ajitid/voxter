@@ -425,11 +425,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         )
     }
 
-    fn spinner_flat_source(alpha_mult: f32) -> Source<'static> {
-        let a = ((235.0 * alpha_mult.clamp(0.0, 1.0)).round()).clamp(0.0, 255.0) as u8;
-        Source::Solid(SolidSource::from_unpremultiplied_argb(a, 0xFF, 0x4D, 0x4D))
-    }
-
     fn draw_latch_lock_icon(&mut self, center: Point) {
         let lock_pink = SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x5F, 0xA2);
 
@@ -501,23 +496,35 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
         points
     }
 
-    fn spinner_points(
-        center: Point,
-        radius: f32,
-        start_angle: f32,
-        sweep_angle: f32,
-        samples: usize,
-    ) -> Vec<Point> {
-        let mut points = Vec::with_capacity(samples + 1);
-        let r = radius.max(1.0);
-        for i in 0..=samples {
-            let t = i as f32 / samples as f32;
-            let angle = start_angle + (sweep_angle * t);
-            let x = center.x + (r * angle.cos());
-            let y = center.y + (r * angle.sin());
-            points.push(Point::new(x, y));
+    fn draw_sine_squares(&mut self, cx: f32, y_base: f32, elapsed: f32) {
+        let n_squares = 4;
+        let square_size = 6.0;
+        let spacing = 8.0;
+        let total_width = (n_squares as f32 * square_size) + ((n_squares - 1) as f32 * spacing);
+        let start_x = cx - (total_width * 0.5);
+
+        let colors = [
+            SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x4D, 0x4D), // Red
+            SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x9F, 0x43), // Orange/Yellow
+            SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x5F, 0xA2), // Pink
+        ];
+
+        let amplitude = 6.0;
+        let frequency = 9.0;
+        let phase_step = 0.8;
+
+        for i in 0..n_squares {
+            let x = start_x + (i as f32 * (square_size + spacing));
+            let phase = i as f32 * phase_step;
+            let y_offset = (elapsed * frequency + phase).sin() * amplitude;
+            let y = y_base - 10.0 + y_offset;
+
+            let color = &colors[i % colors.len()];
+            let mut pb = PathBuilder::new();
+            pb.rect(x, y - (square_size * 0.5), square_size, square_size);
+            let path = pb.finish();
+            self.dt.fill(&path, &Source::Solid(*color), &DrawOptions::new());
         }
-        points
     }
 
     pub fn draw_frame(&mut self, state: OverlayState, now: Instant, _started_at: Instant) {
@@ -579,21 +586,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
                 }
             }
             OverlayState::Transcribing => {
-                let spinner_center = Point::new(cx, y_base - (height * 0.23).clamp(14.0, 20.0));
-                let spinner_radius = (height * 0.12).clamp(7.0, 11.0);
-                let spinner_sweep = 124.0_f32.to_radians();
-                let spinner_angle =
-                    (std::f32::consts::TAU * 2.2 * state_elapsed) - std::f32::consts::FRAC_PI_2;
-                let spinner_points = Self::spinner_points(
-                    spinner_center,
-                    spinner_radius,
-                    spinner_angle - (spinner_sweep * 0.5),
-                    spinner_sweep,
-                    sample_count,
-                );
-
-                let spinner_source = Self::spinner_flat_source(1.0);
-                self.draw_polyline_source(&spinner_points, stroke_width, &spinner_source);
+                self.draw_sine_squares(cx, y_base, state_elapsed);
             }
             OverlayState::Hidden => {}
         }
