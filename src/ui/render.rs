@@ -579,8 +579,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
                 }
             }
             OverlayState::Transcribing => {
-                let spinner_center = Point::new(cx, y_base - (height * 0.23).clamp(18.0, 26.0));
-                let spinner_radius = (height * 0.18).clamp(14.0, 20.0);
+                let spinner_center = Point::new(cx, y_base - (height * 0.23).clamp(14.0, 20.0));
+                let spinner_radius = (height * 0.12).clamp(7.0, 11.0);
                 let spinner_sweep = 124.0_f32.to_radians();
                 let spinner_angle =
                     (std::f32::consts::TAU * 2.2 * state_elapsed) - std::f32::consts::FRAC_PI_2;
