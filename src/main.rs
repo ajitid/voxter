@@ -832,7 +832,7 @@ fn run_opus_worker(
         opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Voip)
             .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
     encoder
-        .set_bitrate(opus::Bitrate::Bits(24000))
+        .set_bitrate(opus::Bitrate::Bits(32000))
         .map_err(|e| format!("Failed to set bitrate: {}", e))?;
 
     // Prepare Ogg container
