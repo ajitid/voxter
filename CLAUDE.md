@@ -14,8 +14,8 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 - Run `cargo fmt && cargo clippy` before committing (Rust 2024 edition)
 
 ## Environment Setup
-- Requires `GROQ_API_KEY` environment variable (loaded via `.env` file with dotenvy)
-- Optional `CONTEXT_BIAS` for domain-specific vocabulary / preferred spellings (comma-separated words or phrases, passed to Groq Whisper as a transcription `prompt`)
+- Requires `MISTRAL_API_KEY` environment variable (loaded via `.env` file with dotenvy)
+- Optional `CONTEXT_BIAS` for domain-specific vocabulary / preferred spellings (comma-separated words or phrases, passed to Mistral Voxtral as `context_bias`)
 - On macOS: App needs Accessibility permissions for `enigo` keyboard simulation and `rdev` global hotkey capture
 
 ## Architecture

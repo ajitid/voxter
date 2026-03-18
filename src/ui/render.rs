@@ -523,7 +523,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{
             let mut pb = PathBuilder::new();
             pb.rect(x, y - (square_size * 0.5), square_size, square_size);
             let path = pb.finish();
-            self.dt.fill(&path, &Source::Solid(*color), &DrawOptions::new());
+            self.dt
+                .fill(&path, &Source::Solid(*color), &DrawOptions::new());
         }
     }
 

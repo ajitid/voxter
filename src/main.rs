@@ -193,7 +193,7 @@ impl AudioRecorder {
         let sr = self.sample_rate;
         std::thread::spawn(move || {
             if let Err(e) = run_opus_worker(rx, result_tx, sr) {
-                eprintln!("Opus worker error: {}", e);
+                eprintln!("Audio encoding error: {}", e);
             }
         });
 
@@ -540,20 +540,20 @@ impl AudioManager {
             let result_rx_arc = Arc::clone(&self.recorder.result_rx);
             let proxy_clone = proxy.clone();
             std::thread::spawn(move || {
-                println!("Finalizing Opus stream...");
+                println!("Finalizing audio stream...");
                 let start = Instant::now();
                 let opus_data = {
                     let mut guard = result_rx_arc.lock().unwrap();
                     match guard.take().unwrap().recv() {
                         Ok(bytes) => bytes,
                         Err(e) => {
-                            eprintln!("Failed to receive Opus data: {}", e);
+                            eprintln!("Failed to receive audio data: {}", e);
                             Vec::new()
                         }
                     }
                 };
                 let dt = start.elapsed();
-                println!("Opus finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
+                println!("Audio finalize time: {:.3} ms", dt.as_secs_f64() * 1000.0);
                 if !opus_data.is_empty() {
                     /*
                     // Save the Ogg Opus file
@@ -594,7 +594,7 @@ impl AudioManager {
                         }
                     }
                 } else {
-                    eprintln!("No Opus data produced");
+                    eprintln!("No audio data produced");
                     let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
                 }
             });
@@ -644,7 +644,7 @@ fn check_speech_activity(opus_data: &[u8]) -> Result<bool, String> {
                 all_samples.extend_from_slice(&pcm_buffer[..samples]);
             }
             Err(e) => {
-                eprintln!("Opus decode error: {}", e);
+                eprintln!("Audio decode error: {}", e);
                 continue;
             }
         }
@@ -709,43 +709,35 @@ fn _save_ogg_file(ogg_data: &[u8]) -> Result<String, Box<dyn std::error::Error>>
     Ok(filename)
 }
 
-fn build_groq_prompt(context_bias: &str) -> Option<String> {
-    let mut terms = Vec::new();
+fn parse_context_bias(context_bias: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
 
     for term in context_bias.split(',').map(str::trim) {
-        if term.is_empty() || terms.contains(&term) {
+        if term.is_empty() {
             continue;
         }
-        terms.push(term);
+        // Mistral requires terms without spaces/commas - replace spaces with underscores
+        let normalized = term.replace(' ', "_");
+        if !terms.contains(&normalized) {
+            terms.push(normalized);
+        }
     }
 
-    if terms.is_empty() {
-        return None;
-    }
-
-    let mut prompt = format!("Use these spellings if relevant: {}.", terms.join(", "));
-
-    const MAX_PROMPT_CHARS: usize = 400;
-    if prompt.len() > MAX_PROMPT_CHARS {
-        prompt.truncate(MAX_PROMPT_CHARS);
-    }
-
-    Some(prompt)
+    terms
 }
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let api_key = env::var("GROQ_API_KEY").expect("GROQ_API_KEY environment variable must be set");
+    let api_key =
+        env::var("MISTRAL_API_KEY").expect("MISTRAL_API_KEY environment variable must be set");
     let context_bias = env::var("CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
     let mut form = multipart::Form::new()
-        .text("model", "whisper-large-v3-turbo")
+        .text("model", "voxtral-mini-latest")
         .text("language", "en")
-        .text("response_format", "json")
-        .text("temperature", "0")
         .part(
             "file",
             multipart::Part::bytes(opus_data)
@@ -753,21 +745,32 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
                 .mime_str("audio/ogg")?,
         );
 
-    if let Some(prompt) = context_bias.as_deref().and_then(build_groq_prompt) {
-        form = form.text("prompt", prompt);
+    // Add context bias terms as array (each term gets its own form field)
+    if let Some(bias) = context_bias.as_deref() {
+        for term in parse_context_bias(bias) {
+            form = form.text("context_bias", term);
+        }
     }
 
-    println!("Sending Ogg Opus audio to Groq Whisper API...");
+    println!("Sending OGG audio to Mistral Voxtral API...");
     let start_time = Instant::now();
 
     let response = client
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
+        .post("https://api.mistral.ai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
-        .send()?
-        .error_for_status()?;
+        .send()?;
 
     let api_latency = start_time.elapsed();
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "Unable to read response body".to_string());
+        return Err(format!("API error ({}): {}", status, body).into());
+    }
+
     let transcription: TranscriptionResponse = response.json()?;
 
     let clean_text = transcription.text.trim().to_string();
@@ -1147,7 +1150,7 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Groq Whisper Speech-to-Text");
+    println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
     println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
     println!(
