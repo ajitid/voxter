@@ -709,35 +709,43 @@ fn _save_ogg_file(ogg_data: &[u8]) -> Result<String, Box<dyn std::error::Error>>
     Ok(filename)
 }
 
-fn parse_context_bias(context_bias: &str) -> Vec<String> {
-    let mut terms: Vec<String> = Vec::new();
+fn build_groq_prompt(context_bias: &str) -> Option<String> {
+    let mut terms = Vec::new();
 
     for term in context_bias.split(',').map(str::trim) {
-        if term.is_empty() {
+        if term.is_empty() || terms.contains(&term) {
             continue;
         }
-        // Mistral requires terms without spaces/commas - replace spaces with underscores
-        let normalized = term.replace(' ', "_");
-        if !terms.contains(&normalized) {
-            terms.push(normalized);
-        }
+        terms.push(term);
     }
 
-    terms
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut prompt = format!("Use these spellings if relevant: {}.", terms.join(", "));
+
+    const MAX_PROMPT_CHARS: usize = 400;
+    if prompt.len() > MAX_PROMPT_CHARS {
+        prompt.truncate(MAX_PROMPT_CHARS);
+    }
+
+    Some(prompt)
 }
 
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let api_key =
-        env::var("MISTRAL_API_KEY").expect("MISTRAL_API_KEY environment variable must be set");
+    let api_key = env::var("GROQ_API_KEY").expect("GROQ_API_KEY environment variable must be set");
     let context_bias = env::var("CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
     let mut form = multipart::Form::new()
-        .text("model", "voxtral-mini-latest")
+        .text("model", "whisper-large-v3-turbo")
         .text("language", "en")
+        .text("response_format", "json")
+        .text("temperature", "0")
         .part(
             "file",
             multipart::Part::bytes(opus_data)
@@ -745,32 +753,21 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
                 .mime_str("audio/ogg")?,
         );
 
-    // Add context bias terms as array (each term gets its own form field)
-    if let Some(bias) = context_bias.as_deref() {
-        for term in parse_context_bias(bias) {
-            form = form.text("context_bias", term);
-        }
+    if let Some(prompt) = context_bias.as_deref().and_then(build_groq_prompt) {
+        form = form.text("prompt", prompt);
     }
 
-    println!("Sending OGG audio to Mistral Voxtral API...");
+    println!("Sending OGG audio to Groq Whisper API...");
     let start_time = Instant::now();
 
     let response = client
-        .post("https://api.mistral.ai/v1/audio/transcriptions")
+        .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
-        .send()?;
+        .send()?
+        .error_for_status()?;
 
     let api_latency = start_time.elapsed();
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
-        return Err(format!("API error ({}): {}", status, body).into());
-    }
-
     let transcription: TranscriptionResponse = response.json()?;
 
     let clean_text = transcription.text.trim().to_string();
@@ -1150,7 +1147,7 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Mistral Voxtral Speech-to-Text");
+    println!("Groq Whisper Speech-to-Text");
     println!("Recording modes:");
     println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
     println!(
