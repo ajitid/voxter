@@ -723,9 +723,12 @@ fn build_groq_prompt(context_bias: &str) -> Option<String> {
         return None;
     }
 
-    let mut prompt = format!("Use these spellings if relevant: {}.", terms.join(", "));
+    // Whisper treats prompt as a previous transcript (not as instructions).
+    // A glossary-style prefix followed by terms used naturally works best.
+    let mut prompt = format!("Glossary: {}.", terms.join(", "));
 
-    const MAX_PROMPT_CHARS: usize = 400;
+    // Whisper's prompt window is 224 tokens; ~800 chars is a safe ceiling.
+    const MAX_PROMPT_CHARS: usize = 800;
     if prompt.len() > MAX_PROMPT_CHARS {
         prompt.truncate(MAX_PROMPT_CHARS);
     }
