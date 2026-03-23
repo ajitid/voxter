@@ -709,42 +709,14 @@ fn _save_ogg_file(ogg_data: &[u8]) -> Result<String, Box<dyn std::error::Error>>
     Ok(filename)
 }
 
-fn build_groq_prompt(context_bias: &str) -> Option<String> {
-    let mut terms = Vec::new();
-
-    for term in context_bias.split(',').map(str::trim) {
-        if term.is_empty() || terms.contains(&term) {
-            continue;
-        }
-        terms.push(term);
-    }
-
-    if terms.is_empty() {
-        return None;
-    }
-
-    // Whisper treats prompt as a previous transcript (not as instructions).
-    // A glossary-style prefix followed by terms used naturally works best.
-    let mut prompt = format!("Glossary: {}.", terms.join(", "));
-
-    // Whisper's prompt window is 224 tokens; ~800 chars is a safe ceiling.
-    const MAX_PROMPT_CHARS: usize = 800;
-    if prompt.len() > MAX_PROMPT_CHARS {
-        prompt.truncate(MAX_PROMPT_CHARS);
-    }
-
-    Some(prompt)
-}
-
 fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let api_key = env::var("GROQ_API_KEY").expect("GROQ_API_KEY environment variable must be set");
-    let context_bias = env::var("CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
-    let mut form = multipart::Form::new()
+    let form = multipart::Form::new()
         .text("model", "whisper-large-v3-turbo")
         .text("language", "en")
         .text("response_format", "json")
@@ -755,10 +727,6 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
                 .file_name("audio.ogg")
                 .mime_str("audio/ogg")?,
         );
-
-    if let Some(prompt) = context_bias.as_deref().and_then(build_groq_prompt) {
-        form = form.text("prompt", prompt);
-    }
 
     println!("Sending OGG audio to Groq Whisper API...");
     let start_time = Instant::now();
