@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
 use ui::overlay::{OverlayController, OverlayState};
+use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -78,7 +79,6 @@ enum ControlMsg {
     StopHold,
     SinglePress,
     SwitchToLatch,
-    TypeLastTranscription,
     Quit,
 }
 
@@ -86,6 +86,8 @@ enum ControlMsg {
 enum AppEvent {
     Control(ControlMsg),
     Overlay(OverlayState),
+    TrayMenu(tray_icon::menu::MenuEvent),
+    TranscriptUpdated,
 }
 
 pub(crate) struct SpeechVizState {
@@ -570,7 +572,9 @@ impl AudioManager {
                                     .send_event(AppEvent::Overlay(OverlayState::Transcribing));
                                 play_sound("assets/off.mp3");
                                 println!("Processing transcription...");
-                                if let Err(e) = transcribe_audio_opus(opus_data) {
+                                if let Err(e) =
+                                    transcribe_audio_opus(opus_data, proxy_clone.clone())
+                                {
                                     eprintln!("Failed to transcribe audio: {}", e);
                                 }
                                 let _ =
@@ -587,7 +591,7 @@ impl AudioManager {
                                 .send_event(AppEvent::Overlay(OverlayState::Transcribing));
                             play_sound("assets/off.mp3");
                             println!("Processing transcription...");
-                            if let Err(e) = transcribe_audio_opus(opus_data) {
+                            if let Err(e) = transcribe_audio_opus(opus_data, proxy_clone.clone()) {
                                 eprintln!("Failed to transcribe audio: {}", e);
                             }
                             let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
@@ -726,7 +730,10 @@ fn parse_context_bias(context_bias: &str) -> Vec<String> {
     terms
 }
 
-fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+fn transcribe_audio_opus(
+    opus_data: Vec<u8>,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let api_key =
@@ -778,16 +785,33 @@ fn transcribe_audio_opus(opus_data: Vec<u8>) -> Result<(), Box<dyn std::error::E
     println!("API Response Time: {:.2}ms", api_latency.as_millis());
     println!("Transcription: {}", clean_text);
 
-    // Store the normalized transcription for later retyping
     let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
     if let Ok(mut last_transcription) = last_transcription_arc.lock() {
         *last_transcription = Some(clean_text.clone());
     }
+    let _ = proxy.send_event(AppEvent::TranscriptUpdated);
 
     // Type the transcript into the active window
     type_transcript(&clean_text);
 
     Ok(())
+}
+
+fn last_transcription_text() -> Option<String> {
+    let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
+    last_transcription_arc
+        .lock()
+        .ok()
+        .and_then(|value| value.clone())
+}
+
+fn type_last_transcript() -> Result<bool, String> {
+    let Some(text) = last_transcription_text() else {
+        return Ok(false);
+    };
+
+    type_transcript(&text);
+    Ok(true)
 }
 
 fn type_transcript(text: &str) {
@@ -949,6 +973,7 @@ struct App {
     audio_manager: AudioManager,
     overlay: Option<OverlayController>,
     overlay_window_id: Option<WindowId>,
+    tray: Option<StatusTray>,
     proxy: EventLoopProxy<AppEvent>,
 }
 
@@ -958,6 +983,7 @@ impl App {
             audio_manager: AudioManager::new(),
             overlay: None,
             overlay_window_id: None,
+            tray: None,
             proxy,
         }
     }
@@ -972,6 +998,34 @@ impl App {
         } else {
             ControlFlow::Wait
         });
+    }
+
+    fn refresh_tray_menu_state(&self) {
+        if let Some(tray) = self.tray.as_ref() {
+            let enabled = last_transcription_text().is_some();
+            tray.type_item.set_enabled(enabled);
+        }
+    }
+
+    fn handle_tray_menu_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: tray_icon::menu::MenuEvent,
+    ) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+
+        if event.id == tray.type_item.id() {
+            match type_last_transcript() {
+                Ok(true) => println!("Typed last transcript"),
+                Ok(false) => println!("No last transcript available to type"),
+                Err(e) => eprintln!("Failed to type transcript: {e}"),
+            }
+            self.refresh_tray_menu_state();
+        } else if event.id == tray.quit_item.id() {
+            self.handle_control(event_loop, ControlMsg::Quit);
+        }
     }
 
     fn handle_control(&mut self, event_loop: &ActiveEventLoop, msg: ControlMsg) {
@@ -1010,18 +1064,6 @@ impl App {
                 Ok(false) => {}
                 Err(e) => eprintln!("Failed to switch to latch mode: {}", e),
             },
-            ControlMsg::TypeLastTranscription => {
-                let last_transcription_arc =
-                    LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
-                if let Ok(last_transcription) = last_transcription_arc.lock() {
-                    if let Some(ref text) = *last_transcription {
-                        println!("Retyping last transcription: {}", text);
-                        type_transcript(text);
-                    } else {
-                        println!("No previous transcription to retype");
-                    }
-                }
-            }
             ControlMsg::Quit => {
                 if self.audio_manager.recorder.is_recording()
                     && let Err(e) = self.audio_manager.stop_recording(self.proxy.clone())
@@ -1048,6 +1090,14 @@ impl ApplicationHandler<AppEvent> for App {
                 Err(e) => eprintln!("Overlay initialization failed: {}", e),
             }
         }
+
+        if self.tray.is_none() {
+            match build_status_tray() {
+                Ok(tray) => self.tray = Some(tray),
+                Err(e) => eprintln!("Tray initialization failed: {e}"),
+            }
+        }
+        self.refresh_tray_menu_state();
         self.update_loop_mode(event_loop);
     }
 
@@ -1065,6 +1115,8 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.update_loop_mode(event_loop);
             }
+            AppEvent::TrayMenu(event) => self.handle_tray_menu_event(event_loop, event),
+            AppEvent::TranscriptUpdated => self.refresh_tray_menu_state(),
         }
     }
 
@@ -1114,28 +1166,12 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
 
         set_is_main_thread(false);
 
-        let mut modifier_pressed = false;
-        let mut quote_combo_active = false;
-
         let callback = move |event: rdev::Event| match event.event_type {
             EventType::KeyPress(Key::AltGr) => {
-                modifier_pressed = true;
                 let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
             }
             EventType::KeyRelease(Key::AltGr) => {
-                modifier_pressed = false;
                 let _ = proxy.send_event(AppEvent::Control(ControlMsg::StopHold));
-            }
-            EventType::KeyPress(Key::Quote) => {
-                if modifier_pressed {
-                    quote_combo_active = true;
-                }
-            }
-            EventType::KeyRelease(Key::Quote) => {
-                if quote_combo_active {
-                    quote_combo_active = false;
-                    let _ = proxy.send_event(AppEvent::Control(ControlMsg::TypeLastTranscription));
-                }
             }
             EventType::KeyPress(Key::Space) => {
                 let _ = proxy.send_event(AppEvent::Control(ControlMsg::SwitchToLatch));
@@ -1156,8 +1192,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
     );
-    println!("Other hotkeys:");
-    println!("  Right Option+' : Retype last transcription");
+    println!("Menu bar:");
+    println!("  Use the microphone icon to type the last transcript or quit");
     println!("Waiting for hotkey...");
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
@@ -1171,6 +1207,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = quit_proxy.send_event(AppEvent::Control(ControlMsg::Quit));
         })
         .expect("failed to set Ctrl+C handler");
+    }
+
+    {
+        let menu_proxy = proxy.clone();
+        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = menu_proxy.send_event(AppEvent::TrayMenu(event));
+        }));
     }
 
     spawn_hotkey_listener(proxy.clone());

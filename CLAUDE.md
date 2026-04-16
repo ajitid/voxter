@@ -23,7 +23,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 ### Recording Modes
 - **HOLD mode**: Hold Right Option/Alt to record, release to transcribe
 - **LATCH mode**: Press Space during HOLD to switch; press the hotkey again to stop recording
-- **Retype**: Right Option/Alt + ' (quote) retypes the last transcription
+- **Menu bar**: Use the menu-bar microphone icon to type the last transcription or quit
 
 ### Core Components (all in `src/main.rs`)
 - `AudioManager` - Orchestrates recording lifecycle, owns `cpal::Stream` (not Send/Sync, must stay on main thread)
