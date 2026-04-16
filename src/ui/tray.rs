@@ -49,6 +49,7 @@ fn build_status_icon() -> Result<Icon, String> {
     dt.clear(SolidSource::from_unpremultiplied_argb(0, 0, 0, 0));
 
     let black = Source::Solid(SolidSource::from_unpremultiplied_argb(255, 0, 0, 0));
+    let muted = Source::Solid(SolidSource::from_unpremultiplied_argb(145, 0, 0, 0));
     let stroke = StrokeStyle {
         width: s(1.6),
         cap: raqote::LineCap::Round,
@@ -89,7 +90,7 @@ fn build_status_icon() -> Result<Icon, String> {
     anchors.line_to(s(16.2), s(16.0));
     dt.stroke(
         &anchors.finish(),
-        &black,
+        &muted,
         &inner_stroke,
         &DrawOptions::new(),
     );
@@ -107,7 +108,7 @@ fn build_status_icon() -> Result<Icon, String> {
     suspension.line_to(s(7.8), s(15.4));
     dt.stroke(
         &suspension.finish(),
-        &black,
+        &muted,
         &inner_stroke,
         &DrawOptions::new(),
     );
