@@ -606,7 +606,7 @@ impl AudioManager {
     fn switch_to_latch_mode(&mut self) -> Result<bool, String> {
         if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
             self.mode = RecordingMode::Latch;
-            println!("Switched to LATCH mode - press AltGr/Right Cmd to stop");
+            println!("Switched to LATCH mode - press Right Option/Alt to stop");
             Ok(true)
         } else {
             Ok(false)
@@ -1118,11 +1118,11 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
         let mut quote_combo_active = false;
 
         let callback = move |event: rdev::Event| match event.event_type {
-            EventType::KeyPress(Key::MetaRight) => {
+            EventType::KeyPress(Key::AltGr) => {
                 modifier_pressed = true;
                 let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
             }
-            EventType::KeyRelease(Key::MetaRight) => {
+            EventType::KeyRelease(Key::AltGr) => {
                 modifier_pressed = false;
                 let _ = proxy.send_event(AppEvent::Control(ControlMsg::StopHold));
             }
@@ -1152,12 +1152,12 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
-    println!("  HOLD: Hold Right Cmd (⌘), release to transcribe");
+    println!("  HOLD: Hold Right Option (⌥), release to transcribe");
     println!(
-        "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Cmd to stop"
+        "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
     );
     println!("Other hotkeys:");
-    println!("  Right Cmd+' : Retype last transcription");
+    println!("  Right Option+' : Retype last transcription");
     println!("Waiting for hotkey...");
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
