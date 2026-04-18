@@ -1200,7 +1200,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(target_os = "macos")]
-    event_loop_builder.with_activation_policy(ActivationPolicy::Accessory);
+    {
+        event_loop_builder
+            .with_activation_policy(ActivationPolicy::Accessory)
+            .with_activate_ignoring_other_apps(false);
+    }
     let event_loop = event_loop_builder.build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
