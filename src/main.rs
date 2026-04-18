@@ -19,6 +19,8 @@ use voice_activity_detector::VoiceActivityDetector;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
 // Global state for storing the last transcription
@@ -1196,7 +1198,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Use the microphone icon to type the last transcript or quit");
     println!("Waiting for hotkey...");
 
-    let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+    let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
+    event_loop_builder.with_activation_policy(ActivationPolicy::Accessory);
+    let event_loop = event_loop_builder.build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
