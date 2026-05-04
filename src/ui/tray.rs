@@ -9,6 +9,8 @@ pub struct StatusTray {
 }
 
 pub fn build_status_tray() -> Result<StatusTray, String> {
+    ensure_platform_tray_available()?;
+
     let menu = Menu::new();
     let type_item = MenuItem::new("Type last transcript", false, None);
     let separator = PredefinedMenuItem::separator();
@@ -35,6 +37,31 @@ pub fn build_status_tray() -> Result<StatusTray, String> {
         type_item,
         quit_item,
     })
+}
+
+fn ensure_platform_tray_available() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        const APPINDICATOR_LIBRARIES: &[&str] = &[
+            "libayatana-appindicator3.so.1",
+            "libappindicator3.so.1",
+            "libayatana-appindicator3.so",
+            "libappindicator3.so",
+        ];
+
+        let has_appindicator = APPINDICATOR_LIBRARIES
+            .iter()
+            .any(|library| unsafe { libloading::Library::new(library) }.is_ok());
+
+        if !has_appindicator {
+            return Err(
+                "missing Ayatana AppIndicator/AppIndicator runtime library; continuing without tray icon"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn build_status_icon() -> Result<Icon, String> {

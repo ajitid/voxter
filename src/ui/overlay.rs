@@ -30,7 +30,7 @@ impl OverlayController {
         event_loop: &ActiveEventLoop,
         speech_viz: Arc<SpeechVizState>,
     ) -> Result<Self, String> {
-        let mut attrs = Window::default_attributes()
+        let attrs = Window::default_attributes()
             .with_title("voxtral overlay")
             .with_visible(false)
             .with_transparent(true)
@@ -40,9 +40,7 @@ impl OverlayController {
             .with_inner_size(LogicalSize::new(420.0, 96.0));
 
         #[cfg(target_os = "macos")]
-        {
-            attrs = attrs.with_has_shadow(false);
-        }
+        let attrs = attrs.with_has_shadow(false);
 
         let window = Arc::new(
             event_loop
@@ -142,16 +140,7 @@ impl OverlayController {
     }
 
     fn position_at_bottom_center(&self, event_loop: &ActiveEventLoop) -> Result<(), String> {
-        let cursor_pos = current_cursor_position()?;
-
-        let monitor = self
-            .find_monitor_for_cursor(event_loop, cursor_pos)
-            .ok_or_else(|| {
-                format!(
-                    "No monitor contains cursor position ({:.1}, {:.1})",
-                    cursor_pos.0, cursor_pos.1
-                )
-            })?;
+        let monitor = current_overlay_monitor(event_loop)?;
 
         let monitor_pos = monitor.position();
         let monitor_size = monitor.size();
@@ -166,26 +155,46 @@ impl OverlayController {
 
         Ok(())
     }
+}
 
-    fn find_monitor_for_cursor(
-        &self,
-        event_loop: &ActiveEventLoop,
-        cursor_pos: (f64, f64),
-    ) -> Option<MonitorHandle> {
-        let (cx, cy) = cursor_pos;
-        for monitor in event_loop.available_monitors() {
-            let pos = monitor.position();
-            let size = monitor.size();
-            let left = pos.x as f64;
-            let top = pos.y as f64;
-            let right = left + size.width as f64;
-            let bottom = top + size.height as f64;
-            if cx >= left && cx < right && cy >= top && cy < bottom {
-                return Some(monitor);
-            }
+#[cfg(target_os = "macos")]
+fn find_monitor_for_cursor(
+    event_loop: &ActiveEventLoop,
+    cursor_pos: (f64, f64),
+) -> Option<MonitorHandle> {
+    let (cx, cy) = cursor_pos;
+    for monitor in event_loop.available_monitors() {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let left = pos.x as f64;
+        let top = pos.y as f64;
+        let right = left + size.width as f64;
+        let bottom = top + size.height as f64;
+        if cx >= left && cx < right && cy >= top && cy < bottom {
+            return Some(monitor);
         }
-        None
     }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn current_overlay_monitor(event_loop: &ActiveEventLoop) -> Result<MonitorHandle, String> {
+    let cursor_pos = current_cursor_position()?;
+
+    find_monitor_for_cursor(event_loop, cursor_pos).ok_or_else(|| {
+        format!(
+            "No monitor contains cursor position ({:.1}, {:.1})",
+            cursor_pos.0, cursor_pos.1
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn current_overlay_monitor(event_loop: &ActiveEventLoop) -> Result<MonitorHandle, String> {
+    event_loop
+        .primary_monitor()
+        .or_else(|| event_loop.available_monitors().next())
+        .ok_or_else(|| "No monitor available for overlay placement".to_string())
 }
 
 #[cfg(target_os = "macos")]

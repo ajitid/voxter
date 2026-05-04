@@ -1,5 +1,5 @@
-#[cfg(not(target_os = "macos"))]
-compile_error!("This build currently supports macOS only (rdev + on-demand cursor query).");
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("This build currently supports macOS and Linux only.");
 
 mod ui;
 
@@ -78,8 +78,10 @@ enum RecordingMode {
 
 #[derive(Clone)]
 enum ControlMsg {
+    #[cfg(target_os = "macos")]
     StopHold,
     SinglePress,
+    #[cfg(target_os = "macos")]
     SwitchToLatch,
     Quit,
 }
@@ -141,6 +143,38 @@ struct AudioManager {
 }
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+fn select_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    const OPUS_SAMPLE_RATES: &[u32] = &[48_000, 24_000, 16_000, 12_000, 8_000];
+
+    let mut configs = device
+        .supported_input_configs()
+        .map_err(|e| format!("Failed to query input configs: {e}"))?;
+
+    let mut supported = Vec::new();
+    for config in configs.by_ref() {
+        if config.sample_format() != cpal::SampleFormat::F32 {
+            continue;
+        }
+
+        let min = config.min_sample_rate().0;
+        let max = config.max_sample_rate().0;
+        for &sample_rate in OPUS_SAMPLE_RATES {
+            if (min..=max).contains(&sample_rate) {
+                supported.push(config.with_sample_rate(cpal::SampleRate(sample_rate)));
+                break;
+            }
+        }
+    }
+
+    supported
+        .into_iter()
+        .max_by_key(|config| (config.sample_rate().0, config.channels()))
+        .ok_or_else(|| {
+            "No f32 input config supports an Opus-compatible sample rate (48000, 24000, 16000, 12000, or 8000 Hz)"
+                .to_string()
+        })
+}
 
 #[derive(Debug, Deserialize)]
 struct TranscriptionResponse {
@@ -223,9 +257,7 @@ impl AudioRecorder {
             .default_input_device()
             .ok_or("No input device available")?;
 
-        let config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config: {}", e))?;
+        let config = select_input_config(&device)?;
 
         self.sample_rate = config.sample_rate().0;
         self.channels = config.channels();
@@ -287,9 +319,7 @@ impl AudioManager {
             .default_input_device()
             .ok_or("No input device available")?;
 
-        let config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config: {}", e))?;
+        let config = select_input_config(&device)?;
 
         let tx_arc = Arc::clone(&self.recorder.tx);
         let speech_viz = Arc::clone(&self.speech_viz);
@@ -609,6 +639,7 @@ impl AudioManager {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn switch_to_latch_mode(&mut self) -> Result<bool, String> {
         if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
             self.mode = RecordingMode::Latch;
@@ -990,6 +1021,17 @@ impl App {
         }
     }
 
+    fn single_press_start_mode() -> RecordingMode {
+        #[cfg(target_os = "linux")]
+        {
+            RecordingMode::Latch
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            RecordingMode::Hold
+        }
+    }
+
     fn update_loop_mode(&self, event_loop: &ActiveEventLoop) {
         let visible = self
             .overlay
@@ -1032,6 +1074,7 @@ impl App {
 
     fn handle_control(&mut self, event_loop: &ActiveEventLoop, msg: ControlMsg) {
         match msg {
+            #[cfg(target_os = "macos")]
             ControlMsg::StopHold => {
                 if self.audio_manager.recorder.is_recording()
                     && self.audio_manager.mode == RecordingMode::Hold
@@ -1047,16 +1090,20 @@ impl App {
                     if let Err(e) = self.audio_manager.stop_recording(self.proxy.clone()) {
                         eprintln!("Failed to stop recording: {}", e);
                     }
-                } else if !self.audio_manager.recorder.is_recording()
-                    && let Err(e) = self.audio_manager.start_recording(RecordingMode::Hold)
-                {
-                    eprintln!("Failed to start hold recording: {}", e);
-                } else {
-                    let _ = self
-                        .proxy
-                        .send_event(AppEvent::Overlay(OverlayState::Recording));
+                } else if !self.audio_manager.recorder.is_recording() {
+                    let mode = Self::single_press_start_mode();
+                    if let Err(e) = self.audio_manager.start_recording(mode) {
+                        eprintln!("Failed to start recording: {}", e);
+                    } else {
+                        let overlay = match mode {
+                            RecordingMode::Hold => OverlayState::Recording,
+                            RecordingMode::Latch => OverlayState::RecordingLatch,
+                        };
+                        let _ = self.proxy.send_event(AppEvent::Overlay(overlay));
+                    }
                 }
             }
+            #[cfg(target_os = "macos")]
             ControlMsg::SwitchToLatch => match self.audio_manager.switch_to_latch_mode() {
                 Ok(true) => {
                     let _ = self
@@ -1162,6 +1209,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     thread::spawn(move || {
         use rdev::{EventType, Key, set_is_main_thread};
@@ -1187,13 +1235,227 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     });
 }
 
+#[cfg(target_os = "linux")]
+fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
+    thread::spawn(move || {
+        if let Err(e) = pollster::block_on(run_linux_global_shortcuts_listener(proxy)) {
+            eprintln!("Linux global shortcuts listener error: {e}");
+            eprintln!(
+                "Hint: install and configure xdg-desktop-portal with GlobalShortcuts support, then bind the shortcuts in the portal dialog."
+            );
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+async fn run_linux_global_shortcuts_listener(
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<(), String> {
+    use ashpd::desktop::CreateSessionOptions;
+    use ashpd::desktop::global_shortcuts::{
+        BindShortcutsOptions, GlobalShortcuts, ListShortcutsOptions, NewShortcut,
+    };
+    use futures_util::StreamExt;
+
+    let portal = GlobalShortcuts::new().await.map_err(|e| e.to_string())?;
+    if portal.version() < 1 {
+        return Err("GlobalShortcuts portal is unavailable".to_string());
+    }
+
+    let session = portal
+        .create_session(CreateSessionOptions::default())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let shortcuts = [NewShortcut::new(
+        "vstt_record",
+        "Start/stop recording and transcribe",
+    )];
+
+    let existing_shortcuts = portal
+        .list_shortcuts(&session, ListShortcutsOptions::default())
+        .await
+        .ok()
+        .and_then(|request| request.response().ok())
+        .map(|response| {
+            response
+                .shortcuts()
+                .iter()
+                .map(|shortcut| shortcut.id().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let has_record = existing_shortcuts.iter().any(|id| id == "vstt_record");
+
+    if has_record {
+        println!("Using existing portal global shortcut binding");
+    } else {
+        let request = portal
+            .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        let response = request
+            .response()
+            .map_err(|e| format!("GlobalShortcuts binding was rejected or cancelled: {e}"))?;
+        if response.shortcuts().is_empty() {
+            return Err("no global shortcut was bound".to_string());
+        }
+    }
+
+    let mut activated = portal
+        .receive_activated()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    while let Some(event) = activated.next().await {
+        if event.shortcut_id() == "vstt_record" {
+            let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_unbind_global_shortcuts() -> Result<(), String> {
+    use std::process::Command;
+
+    const ROOT: &str = "/org/gnome/settings-daemon/global-shortcuts/";
+    const SCHEMA: &str = "org.gnome.settings-daemon.global-shortcuts";
+    const SHORTCUT_IDS: &[&str] = &["vstt_record"];
+
+    fn run(command: &str, args: &[&str]) -> Result<String, String> {
+        let output = Command::new(command)
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to run `{command}`: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!("`{command} {}` failed: {stderr}", args.join(" ")));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn parse_gsettings_string_array(value: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut current = String::new();
+
+        for ch in value.chars() {
+            if in_string {
+                if escaped {
+                    current.push(ch);
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '\'' {
+                    items.push(std::mem::take(&mut current));
+                    in_string = false;
+                } else {
+                    current.push(ch);
+                }
+            } else if ch == '\'' {
+                in_string = true;
+            }
+        }
+
+        items
+    }
+
+    fn format_gsettings_string_array(items: &[String]) -> String {
+        let quoted = items
+            .iter()
+            .map(|item| format!("'{}'", item.replace('\\', "\\\\").replace('\'', "\\'")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{quoted}]")
+    }
+
+    let dump = run("dconf", &["dump", ROOT])?;
+    let mut matching_apps = Vec::new();
+    let mut current_app: Option<String> = None;
+    let mut current_body = String::new();
+
+    let mut finish_section = |app: &mut Option<String>, body: &mut String| {
+        if let Some(app_id) = app.take()
+            && SHORTCUT_IDS.iter().any(|id| body.contains(id))
+        {
+            matching_apps.push(app_id);
+        }
+        body.clear();
+    };
+
+    for line in dump.lines() {
+        if line.starts_with('[') && line.ends_with(']') {
+            finish_section(&mut current_app, &mut current_body);
+            let section = &line[1..line.len() - 1];
+            current_app = (section != "/").then(|| section.to_string());
+        } else if current_app.is_some() {
+            current_body.push_str(line);
+            current_body.push('\n');
+        }
+    }
+    finish_section(&mut current_app, &mut current_body);
+
+    matching_apps.sort();
+    matching_apps.dedup();
+
+    if matching_apps.is_empty() {
+        println!("No GNOME global shortcut bindings found for vstt_record.");
+        return Ok(());
+    }
+
+    for app_id in &matching_apps {
+        let path = format!("{ROOT}{app_id}/");
+        run("dconf", &["reset", "-f", &path])?;
+        println!("Cleared GNOME global shortcuts at {path}");
+    }
+
+    let applications = run("gsettings", &["get", SCHEMA, "applications"])?;
+    let remaining = parse_gsettings_string_array(&applications)
+        .into_iter()
+        .filter(|app| !matching_apps.contains(app))
+        .collect::<Vec<_>>();
+    let formatted = format_gsettings_string_array(&remaining);
+    run("gsettings", &["set", SCHEMA, "applications", &formatted])?;
+
+    println!("Removed app ids from GNOME global-shortcuts applications list: {matching_apps:?}");
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().any(|arg| arg == "--unbind") {
+        #[cfg(target_os = "linux")]
+        {
+            run_linux_unbind_global_shortcuts()?;
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err("--unbind is only supported on Linux/GNOME".into());
+        }
+    }
+
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
-    println!("  HOLD: Hold Right Option (⌥), release to transcribe");
-    println!(
-        "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        println!("  HOLD: Hold Right Option (⌥), release to transcribe");
+        println!(
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!(
+            "  LATCH: Press the portal-configured record shortcut to start recording; press it again to stop and transcribe"
+        );
+    }
     println!("Menu bar:");
     println!("  Use the microphone icon to type the last transcript or quit");
     println!("Waiting for hotkey...");
