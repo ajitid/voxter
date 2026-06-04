@@ -94,10 +94,6 @@ impl OverlayController {
     }
 }
 
-pub fn check_overlay_available() -> Result<(), String> {
-    connect_and_ping().map(|_| ())
-}
-
 fn connect_and_ping() -> Result<blocking::Connection, String> {
     let connection = blocking::Connection::session()
         .map_err(|e| format!("{EXTENSION_REQUIRED_ERROR}\nSession D-Bus connection error: {e}"))?;

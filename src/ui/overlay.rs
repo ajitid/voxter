@@ -14,4 +14,4 @@ pub use macos::OverlayController;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{OverlayController, check_overlay_available};
+pub use linux::OverlayController;

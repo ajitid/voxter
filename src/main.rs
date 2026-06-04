@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
 #[cfg(target_os = "linux")]
-use ui::overlay::check_overlay_available;
 use ui::overlay::{OverlayController, OverlayState};
 use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
@@ -1670,9 +1669,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
-
-    #[cfg(target_os = "linux")]
-    check_overlay_available()?;
 
     {
         let quit_proxy = proxy.clone();
