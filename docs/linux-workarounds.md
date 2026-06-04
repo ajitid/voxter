@@ -1,5 +1,13 @@
 # Linux workarounds
 
+## GNOME Wayland overlay uses a Shell extension
+
+The visual recording overlay is rendered by a GNOME Shell extension on GNOME Wayland. A normal winit window cannot reliably be positioned bottom-center, stay above app windows, and avoid focus changes under GNOME Wayland compositor rules.
+
+See [Linux GNOME Shell overlay](linux-gnome-shell-overlay.md) for install and verification commands.
+
+Linux typing still uses XDG RemoteDesktop directly; this is independent of overlay rendering.
+
 ## Linux typing uses XDG RemoteDesktop directly
 
 On GNOME Wayland, synthetic keyboard input must go through the XDG RemoteDesktop portal. The app uses portal keysyms directly for Linux auto-typing instead of Enigo's released libei backend.

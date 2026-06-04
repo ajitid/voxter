@@ -4885,6 +4885,7 @@ dependencies = [
  "wgpu",
  "winit",
  "xkeysym",
+ "zbus",
 ]
 
 [[package]]

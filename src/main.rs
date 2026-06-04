@@ -13,6 +13,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
+#[cfg(target_os = "linux")]
+use ui::overlay::check_overlay_available;
 use ui::overlay::{OverlayController, OverlayState};
 use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
@@ -1183,6 +1185,7 @@ fn run_opus_worker(
 struct App {
     audio_manager: AudioManager,
     overlay: Option<OverlayController>,
+    #[cfg(target_os = "macos")]
     overlay_window_id: Option<WindowId>,
     tray: Option<StatusTray>,
     proxy: EventLoopProxy<AppEvent>,
@@ -1193,6 +1196,7 @@ impl App {
         Self {
             audio_manager: AudioManager::new(),
             overlay: None,
+            #[cfg(target_os = "macos")]
             overlay_window_id: None,
             tray: None,
             proxy,
@@ -1311,10 +1315,17 @@ impl ApplicationHandler<AppEvent> for App {
         if self.overlay.is_none() {
             match OverlayController::new(event_loop, Arc::clone(&self.audio_manager.speech_viz)) {
                 Ok(overlay) => {
-                    self.overlay_window_id = Some(overlay.window_id());
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.overlay_window_id = Some(overlay.window_id());
+                    }
                     self.overlay = Some(overlay);
                 }
-                Err(e) => eprintln!("Overlay initialization failed: {}", e),
+                Err(e) => {
+                    eprintln!("Overlay initialization failed: {e}");
+                    #[cfg(target_os = "linux")]
+                    event_loop.exit();
+                }
             }
         }
 
@@ -1353,33 +1364,43 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if Some(window_id) != self.overlay_window_id {
-            return;
+        #[cfg(target_os = "macos")]
+        {
+            if Some(window_id) != self.overlay_window_id {
+                return;
+            }
+
+            if let Some(overlay) = self.overlay.as_mut() {
+                match event {
+                    WindowEvent::CloseRequested => event_loop.exit(),
+                    WindowEvent::Resized(size) => {
+                        let scale_factor = overlay.window().scale_factor();
+                        overlay.handle_resize(size, scale_factor);
+                    }
+                    WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                        let size = overlay.window().inner_size();
+                        overlay.handle_resize(size, scale_factor);
+                    }
+                    WindowEvent::RedrawRequested => {
+                        if let Err(e) = overlay.redraw() {
+                            eprintln!("Overlay redraw failed: {}", e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
-        if let Some(overlay) = self.overlay.as_mut() {
-            match event {
-                WindowEvent::CloseRequested => event_loop.exit(),
-                WindowEvent::Resized(size) => {
-                    let scale_factor = overlay.window().scale_factor();
-                    overlay.handle_resize(size, scale_factor);
-                }
-                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                    let size = overlay.window().inner_size();
-                    overlay.handle_resize(size, scale_factor);
-                }
-                WindowEvent::RedrawRequested => {
-                    if let Err(e) = overlay.redraw() {
-                        eprintln!("Overlay redraw failed: {}", e);
-                    }
-                }
-                _ => {}
-            }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = event_loop;
+            let _ = window_id;
+            let _ = event;
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(overlay) = self.overlay.as_ref()
+        if let Some(overlay) = self.overlay.as_mut()
             && overlay.is_visible()
         {
             overlay.request_redraw();
@@ -1649,6 +1670,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
+
+    #[cfg(target_os = "linux")]
+    check_overlay_available()?;
 
     {
         let quit_proxy = proxy.clone();
