@@ -173,17 +173,21 @@ export default class VoxtralOverlayExtension extends Extension {
         const cx = WIDTH * 0.5;
         const halfChord = Math.max(Math.min(WIDTH * 0.26, WIDTH * 0.42), Math.max(WIDTH * 0.18, 48.0));
         const yBase = HEIGHT - 14.0;
-        const sagitta = 1.8 + displayEnergy * (HEIGHT * 0.42);
-        const left = cx - halfChord;
+        const sagittaRaw = 1.8 + displayEnergy * (HEIGHT * 0.42);
+        const s = Math.max(sagittaRaw, 0.5);
+        const a = Math.max(halfChord, 1.0);
+        const radius = ((a * a) + (s * s)) / (2.0 * s);
+        const cy = yBase + (radius - s);
+        const left = cx - a;
         const samples = 56;
 
-        cr.setLineWidth(5.0);
+        cr.setLineWidth(3.8);
         cr.setLineCap(Cairo.LineCap.ROUND);
         for (let i = 0; i <= samples; i++) {
             const t = i / samples;
-            const x = left + t * halfChord * 2.0;
-            const parabola = 1.0 - Math.pow(t * 2.0 - 1.0, 2.0);
-            const y = yBase - sagitta * parabola;
+            const x = left + t * a * 2.0;
+            const dx = x - cx;
+            const y = cy - Math.sqrt(Math.max(0, radius * radius - dx * dx));
             if (i === 0)
                 cr.moveTo(x, y);
             else

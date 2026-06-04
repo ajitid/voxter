@@ -9,7 +9,7 @@ const BUS_NAME: &str = "com.ajitid.VoxtralSpeechToText.Overlay";
 const OBJECT_PATH: &str = "/com/ajitid/VoxtralSpeechToText/Overlay";
 const INTERFACE: &str = "com.ajitid.VoxtralSpeechToText.Overlay1";
 const MIN_SEND_INTERVAL: Duration = Duration::from_millis(33);
-const MIN_LEVEL_DELTA: f32 = 0.015;
+const MIN_LEVEL_DELTA: f32 = 0.008;
 
 const EXTENSION_REQUIRED_ERROR: &str = "GNOME Shell overlay extension is required on GNOME Wayland but is not available. Install with scripts/install-gnome-shell-extension.sh, enable it, then log out/in.";
 

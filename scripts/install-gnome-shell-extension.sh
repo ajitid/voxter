@@ -13,8 +13,9 @@ if gnome-extensions info "$uuid" >/dev/null 2>&1; then
   gnome-extensions enable "$uuid"
   cat <<'MSG'
 Installed and enabled Voxtral GNOME Shell extension.
-FIXME/Note: Re-installing does NOT reload the running extension in the current session. You still need to log out and log back in for changes to take effect. Check how others do the reload without re-login and fix.
 Verify with: gnome-extensions info voxtral-speech-to-text@ajitid
+
+FIXME/Note: Re-installing does NOT reload the running extension in the current session. You still need to log out and log back in for changes to take effect. Check how others do the reload without re-login and fix.
 MSG
 else
   cat <<'MSG'
