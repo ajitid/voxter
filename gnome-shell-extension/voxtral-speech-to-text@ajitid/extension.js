@@ -1,14 +1,23 @@
 import Cairo from 'gi://cairo';
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 const BUS_NAME = 'com.ajitid.VoxtralSpeechToText.Overlay';
 const OBJECT_PATH = '/com/ajitid/VoxtralSpeechToText/Overlay';
+const APP_BUS_NAME = 'com.ajitid.VoxtralSpeechToText.App';
+const APP_OBJECT_PATH = '/com/ajitid/VoxtralSpeechToText/App';
+const APP_INTERFACE = 'com.ajitid.VoxtralSpeechToText.App1';
 const WIDTH = 420;
 const HEIGHT = 96;
+const STATUS_ICON_WIDTH = 24;
+const STATUS_ICON_HEIGHT = 20;
+const STATUS_ICON_SCALE = 1.2;
 
 const IFACE_XML = `<node>
   <interface name="com.ajitid.VoxtralSpeechToText.Overlay1">
@@ -19,6 +28,9 @@ const IFACE_XML = `<node>
       <arg type="s" name="state" direction="in"/>
       <arg type="d" name="level" direction="in"/>
     </method>
+    <method name="SetTrayState">
+      <arg type="b" name="hasLastTranscript" direction="in"/>
+    </method>
   </interface>
 </node>`;
 
@@ -28,6 +40,50 @@ export default class VoxtralOverlayExtension extends Extension {
         this._level = 0.0;
         this._animationSourceId = 0;
         this._animationStartedUs = GLib.get_monotonic_time();
+        this._appAvailable = false;
+        this._hasLastTranscript = false;
+
+        this._indicator = new PanelMenu.Button(0.0, 'Voxtral Speech-to-Text', false);
+        this._indicatorIcon = new St.DrawingArea({
+            style_class: 'voxtral-status-icon',
+            reactive: false,
+            can_focus: false,
+            width: STATUS_ICON_WIDTH,
+            height: STATUS_ICON_HEIGHT,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._indicatorIcon.set_size(STATUS_ICON_WIDTH, STATUS_ICON_HEIGHT);
+        this._indicatorIcon.connect('repaint', this._drawStatusIcon.bind(this));
+        this._indicator.add_child(this._indicatorIcon);
+
+        this._typeItem = new PopupMenu.PopupMenuItem('Type last transcript');
+        this._typeItem.connect('activate', () => this._callApp('TypeLastTranscript'));
+        this._indicator.menu.addMenuItem(this._typeItem);
+
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this._quitItem = new PopupMenu.PopupMenuItem('Quit');
+        this._quitItem.connect('activate', () => this._callApp('Quit'));
+        this._indicator.menu.addMenuItem(this._quitItem);
+
+        Main.panel.addToStatusArea('voxtral-speech-to-text', this._indicator, 0, 'right');
+        this._updateTrayMenu();
+
+        this._appWatchId = Gio.bus_watch_name(
+            Gio.BusType.SESSION,
+            APP_BUS_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            () => {
+                this._appAvailable = true;
+                this._updateTrayMenu();
+            },
+            () => {
+                this._appAvailable = false;
+                this._hasLastTranscript = false;
+                this._updateTrayMenu();
+            }
+        );
 
         this._actor = new St.DrawingArea({
             style_class: 'voxtral-overlay-container',
@@ -80,6 +136,19 @@ export default class VoxtralOverlayExtension extends Extension {
             this._monitorsChangedId = 0;
         }
 
+        if (this._appWatchId) {
+            Gio.bus_unwatch_name(this._appWatchId);
+            this._appWatchId = 0;
+        }
+
+        if (this._indicator) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
+        this._typeItem = null;
+        this._quitItem = null;
+        this._indicatorIcon = null;
+
         if (this._actor) {
             Main.layoutManager.removeChrome(this._actor);
             this._actor.destroy();
@@ -89,6 +158,11 @@ export default class VoxtralOverlayExtension extends Extension {
 
     Ping() {
         return '1';
+    }
+
+    SetTrayState(hasLastTranscript) {
+        this._hasLastTranscript = Boolean(hasLastTranscript);
+        this._updateTrayMenu();
     }
 
     SetOverlay(state, level) {
@@ -114,6 +188,37 @@ export default class VoxtralOverlayExtension extends Extension {
             this._stopAnimation();
 
         this._actor.queue_repaint();
+    }
+
+    _updateTrayMenu() {
+        if (this._typeItem)
+            this._typeItem.setSensitive(this._appAvailable && this._hasLastTranscript);
+        if (this._quitItem)
+            this._quitItem.setSensitive(this._appAvailable);
+    }
+
+    _callApp(method) {
+        if (!this._appAvailable)
+            return;
+
+        Gio.DBus.session.call(
+            APP_BUS_NAME,
+            APP_OBJECT_PATH,
+            APP_INTERFACE,
+            method,
+            null,
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (_conn, res) => {
+                try {
+                    Gio.DBus.session.call_finish(res);
+                } catch (e) {
+                    logError(e, `Voxtral app D-Bus call failed: ${method}`);
+                }
+            }
+        );
     }
 
     _reposition() {
@@ -149,6 +254,74 @@ export default class VoxtralOverlayExtension extends Extension {
             GLib.Source.remove(this._animationSourceId);
             this._animationSourceId = 0;
         }
+    }
+
+    _drawStatusIcon(area) {
+        const cr = area.get_context();
+        const themeColor = area.get_theme_node().get_foreground_color();
+        const [width, height] = area.get_surface_size();
+        const x = width / 2.0 - 11.0 * STATUS_ICON_SCALE;
+        const y = height / 2.0 - 10.8 * STATUS_ICON_SCALE;
+
+        cr.save();
+        cr.setOperator(Cairo.Operator.CLEAR);
+        cr.paint();
+        cr.restore();
+        cr.setOperator(Cairo.Operator.OVER);
+
+        cr.save();
+        cr.translate(x, y);
+        cr.scale(STATUS_ICON_SCALE, STATUS_ICON_SCALE);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineJoin(Cairo.LineJoin.ROUND);
+
+        const setColor = opacity => cr.setSourceRGBA(
+            themeColor.red / 255.0,
+            themeColor.green / 255.0,
+            themeColor.blue / 255.0,
+            (themeColor.alpha / 255.0) * opacity
+        );
+
+        setColor(1.0);
+        cr.setLineWidth(1.6);
+        cr.moveTo(4.6, 10.8);
+        cr.lineTo(17.4, 10.8);
+        cr.stroke();
+
+        cr.moveTo(5.8, 6.1);
+        cr.lineTo(4.7, 10.8);
+        cr.lineTo(5.8, 15.5);
+        cr.moveTo(16.2, 6.1);
+        cr.lineTo(17.3, 10.8);
+        cr.lineTo(16.2, 15.5);
+        cr.stroke();
+
+        setColor(0.568627);
+        cr.setLineWidth(1.15);
+        cr.moveTo(6.7, 7.0);
+        cr.lineTo(5.8, 5.6);
+        cr.moveTo(15.3, 7.0);
+        cr.lineTo(16.2, 5.6);
+        cr.moveTo(6.7, 14.6);
+        cr.lineTo(5.8, 16.0);
+        cr.moveTo(15.3, 14.6);
+        cr.lineTo(16.2, 16.0);
+        cr.stroke();
+
+        cr.moveTo(6.0, 6.3);
+        cr.lineTo(11.0, 10.8);
+        cr.lineTo(16.0, 6.3);
+        cr.moveTo(6.0, 15.3);
+        cr.lineTo(11.0, 10.8);
+        cr.lineTo(16.0, 15.3);
+        cr.moveTo(7.8, 6.2);
+        cr.lineTo(14.2, 15.4);
+        cr.moveTo(14.2, 6.2);
+        cr.lineTo(7.8, 15.4);
+        cr.stroke();
+
+        cr.restore();
+        cr.$dispose();
     }
 
     _draw(area) {

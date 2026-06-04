@@ -64,6 +64,13 @@ impl OverlayController {
         }
     }
 
+    pub fn set_tray_state(&self, has_last_transcript: bool) -> Result<(), String> {
+        let proxy = overlay_proxy(&self.connection)?;
+        proxy
+            .call::<_, _, ()>("SetTrayState", &(has_last_transcript,))
+            .map_err(|e| format!("GNOME Shell tray state update failed: {e}"))
+    }
+
     fn send_overlay(&mut self, force: bool) -> Result<(), String> {
         let level = current_level(&self.speech_viz, self.state);
         let now = Instant::now();

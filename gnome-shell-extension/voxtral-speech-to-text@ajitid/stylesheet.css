@@ -2,3 +2,10 @@
   width: 420px;
   height: 96px;
 }
+
+.voxtral-status-icon {
+  width: 24px;
+  height: 20px;
+  min-width: 24px;
+  min-height: 20px;
+}

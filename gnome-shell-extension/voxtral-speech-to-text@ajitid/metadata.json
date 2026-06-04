@@ -1,7 +1,7 @@
 {
   "uuid": "voxtral-speech-to-text@ajitid",
-  "name": "Voxtral Speech-to-Text Overlay",
-  "description": "GNOME Shell overlay for Voxtral Speech-to-Text recording status",
+  "name": "Voxtral Speech-to-Text",
+  "description": "GNOME Shell overlay and panel menu for Voxtral Speech-to-Text",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "version": 1
 }

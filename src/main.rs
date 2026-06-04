@@ -15,6 +15,7 @@ use std::thread;
 use std::time::Instant;
 #[cfg(target_os = "linux")]
 use ui::overlay::{OverlayController, OverlayState};
+#[cfg(target_os = "macos")]
 use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
 use winit::application::ApplicationHandler;
@@ -95,8 +96,93 @@ enum ControlMsg {
 enum AppEvent {
     Control(ControlMsg),
     Overlay(OverlayState),
+    #[cfg(target_os = "macos")]
     TrayMenu(tray_icon::menu::MenuEvent),
+    #[cfg(target_os = "linux")]
+    TypeLastTranscript,
     TranscriptUpdated,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxAppDbusHandle {
+    stop_tx: std::sync::mpsc::Sender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxAppDbusHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxAppActions {
+    proxy: EventLoopProxy<AppEvent>,
+}
+
+#[cfg(target_os = "linux")]
+#[zbus::interface(name = "com.ajitid.VoxtralSpeechToText.App1")]
+impl LinuxAppActions {
+    fn ping(&self) -> &str {
+        "1"
+    }
+
+    fn type_last_transcript(&self) {
+        let _ = self.proxy.send_event(AppEvent::TypeLastTranscript);
+    }
+
+    fn quit(&self) {
+        let _ = self.proxy.send_event(AppEvent::Control(ControlMsg::Quit));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_app_dbus(proxy: EventLoopProxy<AppEvent>) -> Result<LinuxAppDbusHandle, String> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+
+    let join = std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let connection = zbus::blocking::connection::Builder::session()
+                .map_err(|e| format!("Linux app D-Bus session connection failed: {e}"))?
+                .name("com.ajitid.VoxtralSpeechToText.App")
+                .map_err(|e| format!("Failed to own app D-Bus name: {e}"))?
+                .serve_at(
+                    "/com/ajitid/VoxtralSpeechToText/App",
+                    LinuxAppActions { proxy },
+                )
+                .map_err(|e| format!("Failed to export app D-Bus object: {e}"))?
+                .build()
+                .map_err(|e| format!("Failed to build app D-Bus connection: {e}"))?;
+
+            let _ = ready_tx.send(Ok(()));
+
+            loop {
+                match stop_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+            drop(connection);
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            let _ = ready_tx.send(Err(e));
+        }
+    });
+
+    ready_rx
+        .recv()
+        .map_err(|e| format!("App D-Bus startup channel failed: {e}"))??;
+    Ok(LinuxAppDbusHandle {
+        stop_tx,
+        join: Some(join),
+    })
 }
 
 pub(crate) struct SpeechVizState {
@@ -835,6 +921,7 @@ fn transcribe_audio_opus(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn last_transcription_text() -> Option<String> {
     let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
     last_transcription_arc
@@ -843,6 +930,7 @@ fn last_transcription_text() -> Option<String> {
         .and_then(|value| value.clone())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn type_last_transcript() -> Result<bool, String> {
     let Some(text) = last_transcription_text() else {
         return Ok(false);
@@ -1186,6 +1274,7 @@ struct App {
     overlay: Option<OverlayController>,
     #[cfg(target_os = "macos")]
     overlay_window_id: Option<WindowId>,
+    #[cfg(target_os = "macos")]
     tray: Option<StatusTray>,
     proxy: EventLoopProxy<AppEvent>,
 }
@@ -1197,6 +1286,7 @@ impl App {
             overlay: None,
             #[cfg(target_os = "macos")]
             overlay_window_id: None,
+            #[cfg(target_os = "macos")]
             tray: None,
             proxy,
         }
@@ -1225,6 +1315,7 @@ impl App {
         });
     }
 
+    #[cfg(target_os = "macos")]
     fn refresh_tray_menu_state(&self) {
         if let Some(tray) = self.tray.as_ref() {
             let enabled = last_transcription_text().is_some();
@@ -1232,6 +1323,7 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn handle_tray_menu_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1240,7 +1332,6 @@ impl App {
         let Some(tray) = self.tray.as_ref() else {
             return;
         };
-
         if event.id == tray.type_item.id() {
             match type_last_transcript() {
                 Ok(true) => println!("Typed last transcript"),
@@ -1319,6 +1410,10 @@ impl ApplicationHandler<AppEvent> for App {
                         self.overlay_window_id = Some(overlay.window_id());
                     }
                     self.overlay = Some(overlay);
+                    #[cfg(target_os = "linux")]
+                    if let Some(overlay) = self.overlay.as_ref() {
+                        let _ = overlay.set_tray_state(last_transcription_text().is_some());
+                    }
                 }
                 Err(e) => {
                     eprintln!("Overlay initialization failed: {e}");
@@ -1328,13 +1423,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
-        if self.tray.is_none() {
-            match build_status_tray() {
-                Ok(tray) => self.tray = Some(tray),
-                Err(e) => eprintln!("Tray initialization failed: {e}"),
+        #[cfg(target_os = "macos")]
+        {
+            if self.tray.is_none() {
+                match build_status_tray() {
+                    Ok(tray) => self.tray = Some(tray),
+                    Err(e) => eprintln!("Tray initialization failed: {e}"),
+                }
             }
+            self.refresh_tray_menu_state();
         }
-        self.refresh_tray_menu_state();
         self.update_loop_mode(event_loop);
     }
 
@@ -1352,8 +1450,24 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.update_loop_mode(event_loop);
             }
+            #[cfg(target_os = "macos")]
             AppEvent::TrayMenu(event) => self.handle_tray_menu_event(event_loop, event),
-            AppEvent::TranscriptUpdated => self.refresh_tray_menu_state(),
+            #[cfg(target_os = "linux")]
+            AppEvent::TypeLastTranscript => match type_last_transcript() {
+                Ok(true) => println!("Typed last transcript"),
+                Ok(false) => println!("No last transcript available to type"),
+                Err(e) => eprintln!("Failed to type transcript: {e}"),
+            },
+            AppEvent::TranscriptUpdated => {
+                #[cfg(target_os = "macos")]
+                self.refresh_tray_menu_state();
+                #[cfg(target_os = "linux")]
+                if let Some(overlay) = self.overlay.as_ref()
+                    && let Err(e) = overlay.set_tray_state(last_transcription_text().is_some())
+                {
+                    eprintln!("Tray state update failed: {e}");
+                }
+            }
         }
     }
 
@@ -1654,8 +1768,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  LATCH: Press the portal-configured record shortcut to start recording; press it again to stop and transcribe"
         );
     }
-    println!("Menu bar:");
-    println!("  Use the microphone icon to type the last transcript or quit");
+    #[cfg(target_os = "macos")]
+    {
+        println!("Menu bar:");
+        println!("  Use the microphone icon to type the last transcript or quit");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!("GNOME panel menu:");
+        println!("  Use the microphone icon to type the last transcript or quit");
+    }
     println!("Waiting for hotkey...");
 
     let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
@@ -1678,12 +1800,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("failed to set Ctrl+C handler");
     }
 
+    #[cfg(target_os = "macos")]
     {
         let menu_proxy = proxy.clone();
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
             let _ = menu_proxy.send_event(AppEvent::TrayMenu(event));
         }));
     }
+
+    #[cfg(target_os = "linux")]
+    let _linux_app_dbus = spawn_linux_app_dbus(proxy.clone())?;
 
     spawn_hotkey_listener(proxy.clone());
 
