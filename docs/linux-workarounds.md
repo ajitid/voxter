@@ -1,16 +1,16 @@
 # Linux workarounds
 
-## Enigo from git instead of crates.io
+## Linux typing uses XDG RemoteDesktop directly
 
-On GNOME Wayland, the crates.io release of Enigo `0.6.1` can type shifted characters incorrectly when using the libei backend. For example, `Are there any other ways?` may become `are there any other ways/` because uppercase letters and punctuation such as `?` depend on Shift handling.
+On GNOME Wayland, synthetic keyboard input must go through the XDG RemoteDesktop portal. The app uses portal keysyms directly for Linux auto-typing instead of Enigo's released libei backend.
 
-This project therefore uses Enigo from the upstream git `main` branch with the unreleased `xdg_desktop` backend:
+Why not crates.io Enigo `0.6.1` for Linux typing:
 
-```toml
-enigo = { git = "https://github.com/enigo-rs/enigo", branch = "main", default-features = false, features = ["xdg_desktop", "smol"] }
-```
+- Enigo's released libei backend can type shifted characters incorrectly on GNOME Wayland.
+- For example, `Are there any other ways?` may become `are there any other ways/` because uppercase letters and punctuation such as `?` depend on Shift handling.
+- Enigo's unreleased git `xdg_desktop` backend fixed this behavior in testing because it sends keysyms through the XDG RemoteDesktop portal.
 
-The `xdg_desktop` backend sends keysyms through the XDG RemoteDesktop portal, which works better for shifted characters on GNOME Wayland. The `smol` feature is only the async runtime required by Enigo for portal DBus calls.
+The app originally used Enigo from git for that unreleased `xdg_desktop` backend, but now calls the same XDG RemoteDesktop portal APIs directly. This lets the app explicitly close the portal session after typing, so GNOME's screen-sharing/remote-interaction indicator should not stay active longer than needed.
 
 ## GNOME Remote Desktop prompt persistence
 
@@ -21,12 +21,12 @@ The portal supports restore tokens and persistence modes:
 - `Application`: permission persists only while the application is running.
 - `UntilRevoked`: permission persists until the user explicitly revokes it.
 
-Enigo's current git `xdg_desktop` backend requests `PersistMode::Application`, so this app stores and reuses Enigo's `restore_token` only in memory. That should avoid repeated prompts during one app run, but GNOME may prompt again after restarting the app.
+This app currently requests `PersistMode::Application`, stores the returned `restore_token` in memory, and passes it to the next typing session. That should avoid repeated prompts during one app run, but GNOME may prompt again after restarting the app.
 
-To make permission persist across restarts, Enigo would need to expose the portal persist mode in `Settings`, or this project would need to patch/fork Enigo to request:
+To make permission persist across restarts, the app should request:
 
 ```rust
 PersistMode::UntilRevoked
 ```
 
-Then the app should persist the returned `restore_token` to disk and pass it back through `Settings::restore_token` on startup. Restore tokens may rotate, so the app must save the latest token after each successful portal session.
+Then it should persist the returned `restore_token` to disk and pass it back on startup. Restore tokens may rotate, so the app must save the latest token after each successful portal session.

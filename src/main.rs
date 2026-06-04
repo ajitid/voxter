@@ -872,32 +872,101 @@ fn type_transcript(text: &str) {
     });
 }
 
+#[cfg(target_os = "macos")]
 fn try_type(text: &str) -> Result<(), String> {
     use enigo::{Enigo, Keyboard, Settings};
 
-    let mut settings = Settings::default();
-    #[cfg(target_os = "linux")]
-    {
-        settings.restore_token = ENIGO_RESTORE_TOKEN
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map_err(|_| "Enigo restore token lock poisoned".to_string())?
-            .clone();
-    }
-
-    let mut enigo = Enigo::new(&settings).map_err(|e| format!("Enigo init error: {e}"))?;
-
-    #[cfg(target_os = "linux")]
-    if let Some(token) = enigo.restore_token() {
-        *ENIGO_RESTORE_TOKEN
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map_err(|_| "Enigo restore token lock poisoned".to_string())? = Some(token);
-    }
-
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
     enigo
         .text(text)
         .map_err(|e| format!("Enigo text error: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_type(text: &str) -> Result<(), String> {
+    futures::executor::block_on(try_type_linux(text))
+}
+
+#[cfg(target_os = "linux")]
+async fn try_type_linux(text: &str) -> Result<(), String> {
+    use ashpd::desktop::remote_desktop::{
+        DeviceType, KeyState, NotifyKeyboardKeysymOptions, RemoteDesktop, SelectDevicesOptions,
+        StartOptions,
+    };
+    use ashpd::desktop::{CreateSessionOptions, PersistMode};
+
+    let remote_desktop = RemoteDesktop::new()
+        .await
+        .map_err(|e| format!("RemoteDesktop init error: {e}"))?;
+    let session = remote_desktop
+        .create_session(CreateSessionOptions::default())
+        .await
+        .map_err(|e| format!("RemoteDesktop create session error: {e}"))?;
+
+    let restore_token = ENIGO_RESTORE_TOKEN
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())?
+        .clone();
+
+    let mut options = SelectDevicesOptions::default()
+        .set_devices(DeviceType::Keyboard | DeviceType::Pointer)
+        .set_persist_mode(PersistMode::Application);
+    if let Some(token) = restore_token.as_deref() {
+        options = options.set_restore_token(token);
+    }
+
+    remote_desktop
+        .select_devices(&session, options)
+        .await
+        .map_err(|e| format!("RemoteDesktop select devices error: {e}"))?;
+
+    let response = remote_desktop
+        .start(&session, None, StartOptions::default())
+        .await
+        .map_err(|e| format!("RemoteDesktop start error: {e}"))?
+        .response()
+        .map_err(|e| format!("RemoteDesktop response error: {e}"))?;
+
+    if let Some(token) = response.restore_token() {
+        *ENIGO_RESTORE_TOKEN
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())? =
+            Some(token.to_string());
+    }
+
+    let typing_result: Result<(), String> = async {
+        for ch in text.chars() {
+            let keysym: i32 = xkeysym::Keysym::from_char(ch)
+                .raw()
+                .try_into()
+                .map_err(|_| format!("Keysym for {ch:?} is too large"))?;
+            for state in [KeyState::Pressed, KeyState::Released] {
+                remote_desktop
+                    .notify_keyboard_keysym(
+                        &session,
+                        keysym,
+                        state,
+                        NotifyKeyboardKeysymOptions::default(),
+                    )
+                    .await
+                    .map_err(|e| format!("RemoteDesktop typing error: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let close_result = session
+        .close()
+        .await
+        .map_err(|e| format!("RemoteDesktop close session error: {e}"));
+
+    typing_result?;
+    close_result?;
     Ok(())
 }
 
