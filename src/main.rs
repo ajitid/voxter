@@ -27,6 +27,9 @@ use winit::window::WindowId;
 static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
     std::sync::OnceLock::new();
 
+#[cfg(target_os = "linux")]
+static ENIGO_RESTORE_TOKEN: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
     thread::spawn(move || {
@@ -871,8 +874,27 @@ fn type_transcript(text: &str) {
 
 fn try_type(text: &str) -> Result<(), String> {
     use enigo::{Enigo, Keyboard, Settings};
-    let mut enigo =
-        Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
+
+    let mut settings = Settings::default();
+    #[cfg(target_os = "linux")]
+    {
+        settings.restore_token = ENIGO_RESTORE_TOKEN
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "Enigo restore token lock poisoned".to_string())?
+            .clone();
+    }
+
+    let mut enigo = Enigo::new(&settings).map_err(|e| format!("Enigo init error: {e}"))?;
+
+    #[cfg(target_os = "linux")]
+    if let Some(token) = enigo.restore_token() {
+        *ENIGO_RESTORE_TOKEN
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "Enigo restore token lock poisoned".to_string())? = Some(token);
+    }
+
     enigo
         .text(text)
         .map_err(|e| format!("Enigo text error: {e}"))?;
