@@ -28,7 +28,8 @@ static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
     std::sync::OnceLock::new();
 
 #[cfg(target_os = "linux")]
-static ENIGO_RESTORE_TOKEN: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+static REMOTE_DESKTOP_RESTORE_TOKEN: std::sync::OnceLock<Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
 
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
@@ -890,6 +891,70 @@ fn try_type(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+fn remote_desktop_restore_token_path() -> Result<std::path::PathBuf, String> {
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME") {
+        return Ok(std::path::PathBuf::from(state_home)
+            .join("voxtral-speech-to-text")
+            .join("remote-desktop-restore-token"));
+    }
+
+    let home = env::var_os("HOME").ok_or_else(|| {
+        "XDG_STATE_HOME is not set and HOME is not available; cannot locate RemoteDesktop restore token path"
+            .to_string()
+    })?;
+
+    Ok(std::path::PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("voxtral-speech-to-text")
+        .join("remote-desktop-restore-token"))
+}
+
+#[cfg(target_os = "linux")]
+fn load_remote_desktop_restore_token() -> Result<Option<String>, String> {
+    let path = remote_desktop_restore_token_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "Failed to read RemoteDesktop restore token from {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn save_remote_desktop_restore_token(token: &str) -> Result<(), String> {
+    let path = remote_desktop_restore_token_path()?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "RemoteDesktop restore token path has no parent directory: {}",
+            path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        format!(
+            "Failed to create RemoteDesktop restore token directory {}: {e}",
+            parent.display()
+        )
+    })?;
+    std::fs::write(&path, format!("{token}\n")).map_err(|e| {
+        format!(
+            "Failed to write RemoteDesktop restore token to {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 async fn try_type_linux(text: &str) -> Result<(), String> {
     use ashpd::desktop::remote_desktop::{
         DeviceType, KeyState, NotifyKeyboardKeysymOptions, RemoteDesktop, SelectDevicesOptions,
@@ -905,15 +970,22 @@ async fn try_type_linux(text: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("RemoteDesktop create session error: {e}"))?;
 
-    let restore_token = ENIGO_RESTORE_TOKEN
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())?
-        .clone();
+    let restore_token = {
+        let token_cell = REMOTE_DESKTOP_RESTORE_TOKEN.get_or_init(|| Mutex::new(None));
+        let mut guard = token_cell
+            .lock()
+            .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())?;
+
+        if guard.is_none() {
+            *guard = load_remote_desktop_restore_token()?;
+        }
+
+        guard.clone()
+    };
 
     let mut options = SelectDevicesOptions::default()
         .set_devices(DeviceType::Keyboard | DeviceType::Pointer)
-        .set_persist_mode(PersistMode::Application);
+        .set_persist_mode(PersistMode::ExplicitlyRevoked);
     if let Some(token) = restore_token.as_deref() {
         options = options.set_restore_token(token);
     }
@@ -931,11 +1003,26 @@ async fn try_type_linux(text: &str) -> Result<(), String> {
         .map_err(|e| format!("RemoteDesktop response error: {e}"))?;
 
     if let Some(token) = response.restore_token() {
-        *ENIGO_RESTORE_TOKEN
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())? =
-            Some(token.to_string());
+        let persist_result = (|| -> Result<(), String> {
+            save_remote_desktop_restore_token(token)?;
+            *REMOTE_DESKTOP_RESTORE_TOKEN
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .map_err(|_| "RemoteDesktop restore token lock poisoned".to_string())? =
+                Some(token.to_string());
+            Ok(())
+        })();
+
+        if let Err(persist_error) = persist_result {
+            let close_result = session
+                .close()
+                .await
+                .map_err(|e| format!("RemoteDesktop close session error: {e}"));
+            return match close_result {
+                Ok(()) => Err(persist_error),
+                Err(close_error) => Err(format!("{persist_error}; {close_error}")),
+            };
+        }
     }
 
     let typing_result: Result<(), String> = async {

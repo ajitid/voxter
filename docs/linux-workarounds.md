@@ -21,12 +21,13 @@ The portal supports restore tokens and persistence modes:
 - `Application`: permission persists only while the application is running.
 - `UntilRevoked`: permission persists until the user explicitly revokes it.
 
-This app currently requests `PersistMode::Application`, stores the returned `restore_token` in memory, and passes it to the next typing session. That should avoid repeated prompts during one app run, but GNOME may prompt again after restarting the app.
+This app requests ashpd's `PersistMode::ExplicitlyRevoked`, which maps to the portal's `UntilRevoked` mode. It stores the returned `restore_token` in XDG state and passes it back on startup so GNOME can restore the previous approval across app restarts.
 
-To make permission persist across restarts, the app should request:
+The token is stored at:
 
-```rust
-PersistMode::UntilRevoked
-```
+- `$XDG_STATE_HOME/voxtral-speech-to-text/remote-desktop-restore-token`
+- fallback: `$HOME/.local/state/voxtral-speech-to-text/remote-desktop-restore-token`
 
-Then it should persist the returned `restore_token` to disk and pass it back on startup. Restore tokens may rotate, so the app must save the latest token after each successful portal session.
+Restore tokens may rotate, so the app overwrites this file with the latest token returned after each successful portal session. Deleting the file can force the app to request a fresh portal prompt, but true revocation should be done from GNOME's permission/privacy UI if available.
+
+The app still closes the live RemoteDesktop session immediately after typing, so GNOME's screen-sharing/remote-interaction indicator should not stay active longer than needed.
