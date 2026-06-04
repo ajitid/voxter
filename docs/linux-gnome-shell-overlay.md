@@ -16,7 +16,7 @@ gnome-extensions info voxtral-speech-to-text@ajitid
 busctl --user call com.ajitid.VoxtralSpeechToText.Overlay /com/ajitid/VoxtralSpeechToText/Overlay com.ajitid.VoxtralSpeechToText.Overlay1 Ping
 ```
 
-On Wayland, log out and back in after first install if GNOME Shell has not loaded the extension yet.
+For a first local install on GNOME Wayland, GNOME Shell may not notice the newly-created extension directory until the Shell is restarted. X11 users can restart GNOME Shell with `Alt+F2`, `r`, Enter; Wayland users generally need to log out and back in once. After GNOME Shell knows about the extension, normal enable/disable/uninstall operations happen live through `gnome-extensions` / `org.gnome.Shell.Extensions`.
 
 ## Runtime behavior
 

@@ -41,7 +41,6 @@ export default class VoxtralOverlayExtension extends Extension {
         this._actor.connect('repaint', this._draw.bind(this));
 
         Main.layoutManager.addTopChrome(this._actor, {
-            affectsInputRegion: false,
             affectsStruts: false,
             trackFullscreen: true,
         });
@@ -162,14 +161,14 @@ export default class VoxtralOverlayExtension extends Extension {
         cr.setOperator(Cairo.Operator.OVER);
 
         if (this._state === 'recording' || this._state === 'recording_latch')
-            this._drawRecording(cr, this._state === 'recording_latch');
+            this._drawRecording(cr);
         else if (this._state === 'transcribing')
             this._drawTranscribing(cr);
 
         cr.$dispose();
     }
 
-    _drawRecording(cr, latch) {
+    _drawRecording(cr) {
         const displayEnergy = Math.pow(this._level, 0.72);
         const cx = WIDTH * 0.5;
         const halfChord = Math.max(Math.min(WIDTH * 0.26, WIDTH * 0.42), Math.max(WIDTH * 0.18, 48.0));
@@ -178,7 +177,7 @@ export default class VoxtralOverlayExtension extends Extension {
         const left = cx - halfChord;
         const samples = 56;
 
-        cr.setLineWidth(7.0);
+        cr.setLineWidth(5.0);
         cr.setLineCap(Cairo.LineCap.ROUND);
         for (let i = 0; i <= samples; i++) {
             const t = i / samples;
@@ -197,39 +196,27 @@ export default class VoxtralOverlayExtension extends Extension {
         gradient.addColorStopRGBA(1.0, 0.95, 0.35, 0.75, 0.92);
         cr.setSource(gradient);
         cr.stroke();
-
-        if (latch)
-            this._drawLock(cr, cx + halfChord + 20, yBase - sagitta * 0.46);
-    }
-
-    _drawLock(cr, x, y) {
-        cr.save();
-        cr.setSourceRGBA(0.95, 0.82, 0.35, 0.95);
-        cr.setLineWidth(2.6);
-        cr.arc(x, y - 2, 7, Math.PI, 0);
-        cr.stroke();
-        this._roundedRectangle(cr, x - 9, y - 2, 18, 15, 4);
-        cr.fill();
-        cr.restore();
     }
 
     _drawTranscribing(cr) {
         const elapsed = (GLib.get_monotonic_time() - this._animationStartedUs) / 1_000_000.0;
         const colors = [
             [0.15, 0.55, 1.0],
+            [0.35, 0.70, 1.0],
             [0.55, 0.85, 1.0],
+            [0.75, 0.60, 0.88],
             [0.95, 0.35, 0.75],
         ];
 
-        for (let i = 0; i < 3; i++) {
-            const phase = elapsed * 3.4 + i * 0.65;
-            const lift = Math.max(0, Math.sin(phase)) * 18;
-            const size = 13 + Math.max(0, Math.sin(phase)) * 7;
-            const x = WIDTH / 2 - 42 + i * 42 - size / 2;
-            const y = HEIGHT / 2 - size / 2 - lift * 0.35;
+        for (let i = 0; i < 5; i++) {
+            const phase = elapsed * 3.4 + i * 0.55;
+            const lift = Math.max(0, Math.sin(phase)) * 14;
+            const size = 6 + Math.max(0, Math.sin(phase)) * 3;
+            const x = WIDTH / 2 - 50 + i * 24 - size / 2;
+            const y = HEIGHT - 14.0 - size / 2 - lift * 0.35;
             const [r, g, b] = colors[i];
             cr.setSourceRGBA(r, g, b, 0.94);
-            this._roundedRectangle(cr, x, y, size, size, 4);
+            this._roundedRectangle(cr, x, y, size, size, 3);
             cr.fill();
         }
     }
