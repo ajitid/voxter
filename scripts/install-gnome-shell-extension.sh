@@ -2,7 +2,56 @@
 set -euo pipefail
 
 uuid="voxtral-speech-to-text@ajitid"
-src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/gnome-shell-extension/$uuid"
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+src_dir="$repo_dir/gnome-shell-extension/$uuid"
+dst_dir="$HOME/.local/share/gnome-shell/extensions/$uuid"
+uninstall=false
+
+usage() {
+  cat <<EOF_HELP
+Usage: $0 [--uninstall]
+
+Installs/updates the Voxtral GNOME Shell extension.
+
+Options:
+  --uninstall  Remove the installed GNOME Shell extension instead of installing it.
+  -h, --help   Show this help.
+EOF_HELP
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uninstall)
+      uninstall=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$uninstall" == true ]]; then
+  if gnome-extensions info "$uuid" >/dev/null 2>&1; then
+    gnome-extensions disable "$uuid" 2>/dev/null || true
+    gnome-extensions uninstall "$uuid" 2>/dev/null || true
+  fi
+
+  rm -rf "$dst_dir"
+
+  cat <<'MSG'
+Uninstalled Voxtral GNOME Shell extension.
+Verify removal with: gnome-extensions info voxtral-speech-to-text@ajitid
+MSG
+  exit 0
+fi
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 

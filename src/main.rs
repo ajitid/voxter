@@ -144,22 +144,27 @@ impl LinuxAppActions {
 }
 
 #[cfg(target_os = "linux")]
-fn register_linux_portal_app_id() -> Result<(), String> {
+async fn linux_registered_portal_connection() -> Result<zbus::Connection, String> {
     let app_id = ashpd::AppID::try_from(LINUX_APP_ID)
         .map_err(|e| format!("Invalid Linux app id {LINUX_APP_ID}: {e}"))?;
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|e| format!("Failed to create Linux portal D-Bus session connection: {e}"))?;
 
-    pollster::block_on(ashpd::register_host_app(app_id)).map_err(|e| {
-        format!(
-            "Failed to register Linux portal app id {LINUX_APP_ID}: {e}\n\
+    ashpd::register_host_app_with_connection(connection.clone(), app_id)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to register Linux portal app id {LINUX_APP_ID}: {e}\n\
 Install the matching desktop file first, then retry:\n\
   cargo build\n\
   scripts/install-linux-desktop-file.sh\n\
 The desktop filename must be {LINUX_APP_ID}.desktop and its basename must match the app id."
-        )
-    })?;
+            )
+        })?;
 
     println!("Registered Linux portal app id: {LINUX_APP_ID}");
-    Ok(())
+    Ok(connection)
 }
 
 #[cfg(target_os = "linux")]
@@ -1073,7 +1078,8 @@ async fn try_type_linux(text: &str) -> Result<(), String> {
     };
     use ashpd::desktop::{CreateSessionOptions, PersistMode};
 
-    let remote_desktop = RemoteDesktop::new()
+    let connection = linux_registered_portal_connection().await?;
+    let remote_desktop = RemoteDesktop::with_connection(connection)
         .await
         .map_err(|e| format!("RemoteDesktop init error: {e}"))?;
     let session = remote_desktop
@@ -1591,38 +1597,36 @@ async fn run_linux_global_shortcuts_listener(
     };
     use futures_util::StreamExt;
 
-    let portal = GlobalShortcuts::new().await.map_err(|e| e.to_string())?;
+    let connection = linux_registered_portal_connection().await?;
+    let portal = GlobalShortcuts::with_connection(connection)
+        .await
+        .map_err(|e| e.to_string())?;
     if portal.version() < 1 {
         return Err("GlobalShortcuts portal is unavailable".to_string());
     }
-
-    let session = portal
-        .create_session(CreateSessionOptions::default())
-        .await
-        .map_err(|e| e.to_string())?;
 
     let shortcuts = [NewShortcut::new(
         "vstt_record",
         "Start/stop recording and transcribe",
     )];
 
+    let session = portal
+        .create_session(CreateSessionOptions::default())
+        .await
+        .map_err(|e| e.to_string())?;
+
     let existing_shortcuts = portal
         .list_shortcuts(&session, ListShortcutsOptions::default())
         .await
-        .ok()
-        .and_then(|request| request.response().ok())
-        .map(|response| {
-            response
-                .shortcuts()
-                .iter()
-                .map(|shortcut| shortcut.id().to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .map_err(|e| format!("GlobalShortcuts ListShortcuts request failed: {e}"))?
+        .response()
+        .map_err(|e| format!("GlobalShortcuts ListShortcuts was rejected or cancelled: {e}"))?
+        .shortcuts()
+        .iter()
+        .map(|shortcut| shortcut.id().to_string())
+        .collect::<Vec<_>>();
 
-    let has_record = existing_shortcuts.iter().any(|id| id == "vstt_record");
-
-    if has_record {
+    if existing_shortcuts.iter().any(|id| id == "vstt_record") {
         println!("Using existing portal global shortcut binding");
     } else {
         let request = portal
@@ -1632,9 +1636,14 @@ async fn run_linux_global_shortcuts_listener(
         let response = request
             .response()
             .map_err(|e| format!("GlobalShortcuts binding was rejected or cancelled: {e}"))?;
-        if response.shortcuts().is_empty() {
-            return Err("no global shortcut was bound".to_string());
+        if !response
+            .shortcuts()
+            .iter()
+            .any(|shortcut| shortcut.id() == "vstt_record")
+        {
+            return Err("portal did not bind the vstt_record shortcut".to_string());
         }
+        println!("Portal global shortcut binding ready");
     }
 
     let mut activated = portal
@@ -1774,9 +1783,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--unbind is only supported on Linux/GNOME".into());
         }
     }
-
-    #[cfg(target_os = "linux")]
-    register_linux_portal_app_id()?;
 
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
