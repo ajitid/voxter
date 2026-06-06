@@ -19,6 +19,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 - Optional `CONTEXT_BIAS` for domain-specific vocabulary / preferred spellings (comma-separated words or phrases, passed to Mistral Voxtral as `context_bias`)
 - On macOS: App needs Accessibility permissions for `enigo` keyboard simulation and `rdev` global hotkey capture
 - On Linux: App needs an `xdg-desktop-portal` backend with GlobalShortcuts support. GNOME Wayland also requires the bundled GNOME Shell extension for the visual overlay (`scripts/install-gnome-shell-extension.sh`). Do not add users to the `input` group for this app.
+- On Linux development runs, run `cargo build` then `scripts/install-linux-desktop-file.sh` before `cargo run`. The app registers the stable portal app id `com.ajitid.VoxtralSpeechToText` and fails loudly if the matching desktop file is missing or portal registration fails.
 
 ## Architecture
 

@@ -33,6 +33,9 @@ static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
 static REMOTE_DESKTOP_RESTORE_TOKEN: std::sync::OnceLock<Mutex<Option<String>>> =
     std::sync::OnceLock::new();
 
+#[cfg(target_os = "linux")]
+const LINUX_APP_ID: &str = "com.ajitid.VoxtralSpeechToText";
+
 fn play_sound<P: AsRef<std::path::Path>>(path: P) {
     let path_buf = path.as_ref().to_path_buf();
     thread::spawn(move || {
@@ -138,6 +141,25 @@ impl LinuxAppActions {
     fn quit(&self) {
         let _ = self.proxy.send_event(AppEvent::Control(ControlMsg::Quit));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn register_linux_portal_app_id() -> Result<(), String> {
+    let app_id = ashpd::AppID::try_from(LINUX_APP_ID)
+        .map_err(|e| format!("Invalid Linux app id {LINUX_APP_ID}: {e}"))?;
+
+    pollster::block_on(ashpd::register_host_app(app_id)).map_err(|e| {
+        format!(
+            "Failed to register Linux portal app id {LINUX_APP_ID}: {e}\n\
+Install the matching desktop file first, then retry:\n\
+  cargo build\n\
+  scripts/install-linux-desktop-file.sh\n\
+The desktop filename must be {LINUX_APP_ID}.desktop and its basename must match the app id."
+        )
+    })?;
+
+    println!("Registered Linux portal app id: {LINUX_APP_ID}");
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1752,6 +1774,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--unbind is only supported on Linux/GNOME".into());
         }
     }
+
+    #[cfg(target_os = "linux")]
+    register_linux_portal_app_id()?;
 
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
