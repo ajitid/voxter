@@ -1,56 +1,46 @@
 # Linux hotkey permissions
 
-The Linux backend uses the XDG Desktop Portal GlobalShortcuts interface. This does not require membership in the `input` group and does not grant raw `/dev/input/event*` access.
+On GNOME Wayland, the bundled GNOME Shell extension captures the recording shortcut and calls the app over D-Bus. This does not require membership in the `input` group, does not grant raw `/dev/input/event*` access, and intentionally does not use the XDG Desktop Portal GlobalShortcuts interface for recording.
 
 ## Requirements
 
-- A desktop/portal backend with `org.freedesktop.portal.GlobalShortcuts` support.
-- `xdg-desktop-portal` and the desktop-specific backend installed/running.
+- GNOME Shell with the bundled extension installed/enabled.
+- `xdg-desktop-portal` and the GNOME backend installed/running for app identity and RemoteDesktop typing.
 - A matching installed desktop file: `com.ajitid.VoxtralSpeechToText.desktop`.
 
 ## Setup
 
-For development runs, build the binary and install/update the user desktop file so portals can identify the app with a stable app id:
+For development runs, build the binary, install/update the user desktop file, and install/update the GNOME Shell extension:
 
 ```sh
 cargo build
 scripts/install-linux-desktop-file.sh
+scripts/install-gnome-shell-extension.sh
 ```
 
-By default the script points the desktop file to `target/debug/voxtral-speech-to-text`. To use another binary:
+By default the desktop-file script points to `target/debug/voxtral-speech-to-text`. To use another binary:
 
 ```sh
 scripts/install-linux-desktop-file.sh --app-path ./target/release/voxtral-speech-to-text
 ```
 
-Run the app. On first launch, the desktop may show a shortcut binding/permission dialog. Bind the action to whatever shortcut you prefer:
-
-- "Start/stop recording and transcribe"
+The extension provides the overlay, panel menu, and recording shortcut. The default shortcut is `<Super>c`.
 
 Press the shortcut once to start recording. Press it again to stop recording and transcribe.
 
-On startup, the app registers `com.ajitid.VoxtralSpeechToText` with the host portal. It intentionally fails if registration fails, because falling back to transient portal ids can cause repeated shortcut binding prompts or rejections.
+## Changing the shortcut
 
-When editing a shortcut on GNOME, you may see an "Allow inhibiting shortcuts" dialog for `org.gnome.Settings.GlobalShortcutsProvider`. Click **Allow**. This lets GNOME Settings temporarily capture the keys you press while editing the shortcut. If normal desktop shortcuts need to be restored while this capture mode is active, press `Super+Escape`.
-
-## Clearing GNOME bindings
-
-To remove the GNOME global shortcut bindings registered by this app:
+There is no preferences UI yet. Change the shortcut with GSettings:
 
 ```sh
-cargo run -- --unbind
+gsettings set com.ajitid.VoxtralSpeechToText.Extension record-shortcut "['<Super>c']"
+gsettings set com.ajitid.VoxtralSpeechToText.Extension record-shortcut "['<Alt>space']"
 ```
-
-This clears GNOME's stored binding for the app action `vstt_record`.
 
 ## Why no hold mode on GNOME?
 
-GNOME portal shortcuts are used as activation events. This app does not use hold-to-record on Linux because release/deactivation for chorded shortcuts can be unreliable depending on release order. macOS still supports hold mode.
+GNOME extension shortcuts are activation events. This app does not use hold-to-record on Linux; Linux uses latch/toggle mode. macOS still supports hold mode.
 
 ## Why not `input` group?
 
 Adding your user to `input` lets any process running as your user read raw keyboard events, which is keylogging-capable. It is not recommended for normal desktop use.
-
-## Unsupported portals
-
-If your desktop/portal backend does not support `org.freedesktop.portal.GlobalShortcuts`, Linux hotkeys will fail loudly. There is intentionally no raw evdev fallback.

@@ -5,13 +5,16 @@ uuid="voxtral-speech-to-text@ajitid"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src_dir="$repo_dir/gnome-shell-extension/$uuid"
 dst_dir="$HOME/.local/share/gnome-shell/extensions/$uuid"
+schema_file="com.ajitid.VoxtralSpeechToText.Extension.gschema.xml"
+user_schema_dir="$HOME/.local/share/glib-2.0/schemas"
 uninstall=false
 
 usage() {
   cat <<EOF_HELP
 Usage: $0 [--uninstall]
 
-Installs/updates the Voxtral GNOME Shell extension.
+Installs/updates the Voxtral GNOME Shell extension, including its overlay,
+panel menu, and recording shortcut schema.
 
 Options:
   --uninstall  Remove the installed GNOME Shell extension instead of installing it.
@@ -44,19 +47,36 @@ if [[ "$uninstall" == true ]]; then
   fi
 
   rm -rf "$dst_dir"
+  rm -f "$user_schema_dir/$schema_file"
+  if [[ -d "$user_schema_dir" ]] && command -v glib-compile-schemas >/dev/null 2>&1; then
+    glib-compile-schemas "$user_schema_dir"
+  fi
 
   cat <<'MSG'
-Uninstalled Voxtral GNOME Shell extension.
+Uninstalled Voxtral GNOME Shell extension and user GSettings schema.
 Verify removal with: gnome-extensions info voxtral-speech-to-text@ajitid
 MSG
   exit 0
 fi
 
+if ! command -v glib-compile-schemas >/dev/null 2>&1; then
+  echo "glib-compile-schemas is required to install the extension settings schema." >&2
+  exit 1
+fi
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-gnome-extensions pack --force --out-dir "$tmp_dir" "$src_dir" >/dev/null
+gnome-extensions pack \
+  --force \
+  --out-dir "$tmp_dir" \
+  --schema "schemas/$schema_file" \
+  "$src_dir" >/dev/null
 gnome-extensions install --force "$tmp_dir/$uuid.shell-extension.zip"
+glib-compile-schemas "$dst_dir/schemas"
+mkdir -p "$user_schema_dir"
+cp "$src_dir/schemas/$schema_file" "$user_schema_dir/$schema_file"
+glib-compile-schemas "$user_schema_dir"
 
 if gnome-extensions info "$uuid" >/dev/null 2>&1; then
   # This refreshes extension state, but GNOME Shell 45+ uses ESM modules and

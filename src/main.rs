@@ -138,6 +138,12 @@ impl LinuxAppActions {
         let _ = self.proxy.send_event(AppEvent::TypeLastTranscript);
     }
 
+    fn toggle_recording(&self) {
+        let _ = self
+            .proxy
+            .send_event(AppEvent::Control(ControlMsg::SinglePress));
+    }
+
     fn quit(&self) {
         let _ = self.proxy.send_event(AppEvent::Control(ControlMsg::Quit));
     }
@@ -1575,215 +1581,7 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     });
 }
 
-#[cfg(target_os = "linux")]
-fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
-    thread::spawn(move || {
-        if let Err(e) = pollster::block_on(run_linux_global_shortcuts_listener(proxy)) {
-            eprintln!("Linux global shortcuts listener error: {e}");
-            eprintln!(
-                "Hint: install and configure xdg-desktop-portal with GlobalShortcuts support, then bind the shortcuts in the portal dialog."
-            );
-        }
-    });
-}
-
-#[cfg(target_os = "linux")]
-async fn run_linux_global_shortcuts_listener(
-    proxy: EventLoopProxy<AppEvent>,
-) -> Result<(), String> {
-    use ashpd::desktop::CreateSessionOptions;
-    use ashpd::desktop::global_shortcuts::{
-        BindShortcutsOptions, GlobalShortcuts, ListShortcutsOptions, NewShortcut,
-    };
-    use futures_util::StreamExt;
-
-    let connection = linux_registered_portal_connection().await?;
-    let portal = GlobalShortcuts::with_connection(connection)
-        .await
-        .map_err(|e| e.to_string())?;
-    if portal.version() < 1 {
-        return Err("GlobalShortcuts portal is unavailable".to_string());
-    }
-
-    let shortcuts = [NewShortcut::new(
-        "vstt_record",
-        "Start/stop recording and transcribe",
-    )];
-
-    let session = portal
-        .create_session(CreateSessionOptions::default())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let existing_shortcuts = portal
-        .list_shortcuts(&session, ListShortcutsOptions::default())
-        .await
-        .map_err(|e| format!("GlobalShortcuts ListShortcuts request failed: {e}"))?
-        .response()
-        .map_err(|e| format!("GlobalShortcuts ListShortcuts was rejected or cancelled: {e}"))?
-        .shortcuts()
-        .iter()
-        .map(|shortcut| shortcut.id().to_string())
-        .collect::<Vec<_>>();
-
-    if existing_shortcuts.iter().any(|id| id == "vstt_record") {
-        println!("Using existing portal global shortcut binding");
-    } else {
-        let request = portal
-            .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
-            .await
-            .map_err(|e| e.to_string())?;
-        let response = request
-            .response()
-            .map_err(|e| format!("GlobalShortcuts binding was rejected or cancelled: {e}"))?;
-        if !response
-            .shortcuts()
-            .iter()
-            .any(|shortcut| shortcut.id() == "vstt_record")
-        {
-            return Err("portal did not bind the vstt_record shortcut".to_string());
-        }
-        println!("Portal global shortcut binding ready");
-    }
-
-    let mut activated = portal
-        .receive_activated()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    while let Some(event) = activated.next().await {
-        if event.shortcut_id() == "vstt_record" {
-            let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn run_linux_unbind_global_shortcuts() -> Result<(), String> {
-    use std::process::Command;
-
-    const ROOT: &str = "/org/gnome/settings-daemon/global-shortcuts/";
-    const SCHEMA: &str = "org.gnome.settings-daemon.global-shortcuts";
-    const SHORTCUT_IDS: &[&str] = &["vstt_record"];
-
-    fn run(command: &str, args: &[&str]) -> Result<String, String> {
-        let output = Command::new(command)
-            .args(args)
-            .output()
-            .map_err(|e| format!("failed to run `{command}`: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(format!("`{command} {}` failed: {stderr}", args.join(" ")));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn parse_gsettings_string_array(value: &str) -> Vec<String> {
-        let mut items = Vec::new();
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut current = String::new();
-
-        for ch in value.chars() {
-            if in_string {
-                if escaped {
-                    current.push(ch);
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '\'' {
-                    items.push(std::mem::take(&mut current));
-                    in_string = false;
-                } else {
-                    current.push(ch);
-                }
-            } else if ch == '\'' {
-                in_string = true;
-            }
-        }
-
-        items
-    }
-
-    fn format_gsettings_string_array(items: &[String]) -> String {
-        let quoted = items
-            .iter()
-            .map(|item| format!("'{}'", item.replace('\\', "\\\\").replace('\'', "\\'")))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("[{quoted}]")
-    }
-
-    let dump = run("dconf", &["dump", ROOT])?;
-    let mut matching_apps = Vec::new();
-    let mut current_app: Option<String> = None;
-    let mut current_body = String::new();
-
-    let mut finish_section = |app: &mut Option<String>, body: &mut String| {
-        if let Some(app_id) = app.take()
-            && SHORTCUT_IDS.iter().any(|id| body.contains(id))
-        {
-            matching_apps.push(app_id);
-        }
-        body.clear();
-    };
-
-    for line in dump.lines() {
-        if line.starts_with('[') && line.ends_with(']') {
-            finish_section(&mut current_app, &mut current_body);
-            let section = &line[1..line.len() - 1];
-            current_app = (section != "/").then(|| section.to_string());
-        } else if current_app.is_some() {
-            current_body.push_str(line);
-            current_body.push('\n');
-        }
-    }
-    finish_section(&mut current_app, &mut current_body);
-
-    matching_apps.sort();
-    matching_apps.dedup();
-
-    if matching_apps.is_empty() {
-        println!("No GNOME global shortcut bindings found for vstt_record.");
-        return Ok(());
-    }
-
-    for app_id in &matching_apps {
-        let path = format!("{ROOT}{app_id}/");
-        run("dconf", &["reset", "-f", &path])?;
-        println!("Cleared GNOME global shortcuts at {path}");
-    }
-
-    let applications = run("gsettings", &["get", SCHEMA, "applications"])?;
-    let remaining = parse_gsettings_string_array(&applications)
-        .into_iter()
-        .filter(|app| !matching_apps.contains(app))
-        .collect::<Vec<_>>();
-    let formatted = format_gsettings_string_array(&remaining);
-    run("gsettings", &["set", SCHEMA, "applications", &formatted])?;
-
-    println!("Removed app ids from GNOME global-shortcuts applications list: {matching_apps:?}");
-    Ok(())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if env::args().any(|arg| arg == "--unbind") {
-        #[cfg(target_os = "linux")]
-        {
-            run_linux_unbind_global_shortcuts()?;
-            return Ok(());
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            return Err("--unbind is only supported on Linux/GNOME".into());
-        }
-    }
-
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
     #[cfg(target_os = "macos")]
@@ -1796,7 +1594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         println!(
-            "  LATCH: Press the portal-configured record shortcut to start recording; press it again to stop and transcribe"
+            "  LATCH: Press the GNOME Shell extension record shortcut to start recording; press it again to stop and transcribe"
         );
     }
     #[cfg(target_os = "macos")]
@@ -1842,6 +1640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     let _linux_app_dbus = spawn_linux_app_dbus(proxy.clone())?;
 
+    #[cfg(target_os = "macos")]
     spawn_hotkey_listener(proxy.clone());
 
     let mut app = App::new(proxy);

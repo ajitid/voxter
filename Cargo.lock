@@ -4408,7 +4408,6 @@ dependencies = [
  "enigo",
  "flume",
  "futures",
- "futures-util",
  "ogg",
  "opus",
  "pollster",

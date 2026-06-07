@@ -2,6 +2,8 @@ import Cairo from 'gi://cairo';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -18,6 +20,7 @@ const HEIGHT = 96;
 const STATUS_ICON_WIDTH = 24;
 const STATUS_ICON_HEIGHT = 20;
 const STATUS_ICON_SCALE = 1.2;
+const RECORD_SHORTCUT = 'record-shortcut';
 
 const IFACE_XML = `<node>
   <interface name="com.ajitid.VoxtralSpeechToText.Overlay1">
@@ -42,6 +45,7 @@ export default class VoxtralOverlayExtension extends Extension {
         this._animationStartedUs = GLib.get_monotonic_time();
         this._appAvailable = false;
         this._hasLastTranscript = false;
+        this._settings = this.getSettings();
 
         this._indicator = new PanelMenu.Button(0.0, 'Voxtral Speech-to-Text', false);
         this._indicatorIcon = new St.DrawingArea({
@@ -85,6 +89,14 @@ export default class VoxtralOverlayExtension extends Extension {
             }
         );
 
+        Main.wm.addKeybinding(
+            RECORD_SHORTCUT,
+            this._settings,
+            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
+            Shell.ActionMode.ALL,
+            () => this._callApp('ToggleRecording')
+        );
+
         this._actor = new St.DrawingArea({
             style_class: 'voxtral-overlay-container',
             reactive: false,
@@ -120,6 +132,8 @@ export default class VoxtralOverlayExtension extends Extension {
 
     disable() {
         this._stopAnimation();
+        Main.wm.removeKeybinding(RECORD_SHORTCUT);
+        this._settings = null;
 
         if (this._busId) {
             Gio.bus_unown_name(this._busId);

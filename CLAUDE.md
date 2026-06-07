@@ -8,7 +8,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 ## Development Commands
 - `cargo build` - Build the project
 - `cargo run` - Build and run the application
-- Linux/GNOME Wayland: `cargo run` uses XDG Desktop Portal GlobalShortcuts; no `input` group membership is required
+- Linux/GNOME Wayland: `cargo run` uses the bundled GNOME Shell extension for shortcut capture; no `input` group membership is required
 - `cargo check` - Quick syntax and type checking
 - `cargo fmt` - Format code
 - `cargo clippy` - Run linter
@@ -18,7 +18,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 - Requires `MISTRAL_API_KEY` environment variable (loaded via `.env` file with dotenvy)
 - Optional `CONTEXT_BIAS` for domain-specific vocabulary / preferred spellings (comma-separated words or phrases, passed to Mistral Voxtral as `context_bias`)
 - On macOS: App needs Accessibility permissions for `enigo` keyboard simulation and `rdev` global hotkey capture
-- On Linux: App needs an `xdg-desktop-portal` backend with GlobalShortcuts support. GNOME Wayland also requires the bundled GNOME Shell extension for the visual overlay (`scripts/install-gnome-shell-extension.sh`). Do not add users to the `input` group for this app.
+- On Linux/GNOME: App needs the bundled GNOME Shell extension for shortcut capture, visual overlay, and panel menu (`scripts/install-gnome-shell-extension.sh`). XDG portal GlobalShortcuts is intentionally not used on GNOME. Do not add users to the `input` group for this app.
 - On Linux development runs, run `cargo build` then `scripts/install-linux-desktop-file.sh` before `cargo run`. The app registers the stable portal app id `com.ajitid.VoxtralSpeechToText` and fails loudly if the matching desktop file is missing or portal registration fails.
 
 ## Architecture
@@ -26,7 +26,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 ### Recording Modes
 - **macOS HOLD mode**: Hold Right Option/Alt to record, release to transcribe
 - **macOS LATCH mode**: Press Space during HOLD to switch; press hotkey again to stop
-- **Linux portal latch mode**: Press configured global shortcut once to start, again to stop/process
+- **Linux GNOME extension latch mode**: Press configured extension shortcut once to start, again to stop/process (default `<Super>c`)
 - **Menu bar**: Use the menu-bar microphone icon to type the last transcription or quit
 
 ### Core Components (all in `src/main.rs`)
@@ -44,7 +44,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 
 ### Threading Model
 - Main thread: Runs `AudioManager`, handles control messages via `mpsc` channel
-- Platform hotkey listener thread: `rdev` on macOS, XDG Desktop Portal GlobalShortcuts on Linux; sends `ControlMsg` to main thread
+- Platform hotkey capture: `rdev` listener thread on macOS; GNOME Shell extension on Linux calls app D-Bus and sends `ControlMsg` to main thread
 - Opus worker thread: Spawned per recording session
 - Transcription thread: Spawned after recording stops for API call + typing
 

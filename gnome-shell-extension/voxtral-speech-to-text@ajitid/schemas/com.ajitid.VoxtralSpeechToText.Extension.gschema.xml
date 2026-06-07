@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.ajitid.VoxtralSpeechToText.Extension" path="/com/ajitid/VoxtralSpeechToText/Extension/">
+    <key type="as" name="record-shortcut">
+      <default><![CDATA[['<Super>c']]]></default>
+      <summary>Record shortcut</summary>
+      <description>Shortcut used by the Voxtral GNOME Shell extension to start/stop recording.</description>
+    </key>
+  </schema>
+</schemalist>
