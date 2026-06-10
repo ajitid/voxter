@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+"http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>voxter</vendor>
+  <vendor_url>https://github.com/ajitid/voxtral-speech-to-text</vendor_url>
+  <action id="com.ajitid.voxter.hotkey-helper">
+    <description>Run Voxter hotkey helper</description>
+    <message>Authentication is required to let Voxter read keyboard hotkey events</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/voxter-hotkey-helper</annotate>
+  </action>
+</policyconfig>

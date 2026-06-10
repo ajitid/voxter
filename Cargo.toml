@@ -1,7 +1,16 @@
 [package]
-name = "voxtral-speech-to-text"
+name = "voxter"
 version = "0.1.0"
 edition = "2024"
+default-run = "voxter"
+
+[[bin]]
+name = "voxter"
+path = "src/main.rs"
+
+[[bin]]
+name = "voxter-hotkey-helper"
+path = "src/bin/voxter-hotkey-helper.rs"
 
 [dependencies]
 dotenvy = "0.15.7"

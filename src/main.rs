@@ -1174,13 +1174,12 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     thread::spawn(move || {
-        #[cfg(target_os = "macos")]
         use rdev::set_is_main_thread;
         use rdev::{EventType, Key};
 
-        #[cfg(target_os = "macos")]
         set_is_main_thread(false);
 
         let callback = move |event: rdev::Event| match event.event_type {
@@ -1202,13 +1201,117 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+struct HelperHotkeyEvent {
+    event: String,
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
+    const PKEXEC_PATH: &str = "/usr/bin/pkexec";
+    const HELPER_PATH: &str = "/usr/local/libexec/voxter-hotkey-helper";
+
+    thread::spawn(move || {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        if !std::path::Path::new(HELPER_PATH).exists() {
+            eprintln!(
+                "Linux hotkey helper not found at {HELPER_PATH}. Install it with: scripts/install-linux-helper.sh"
+            );
+            return;
+        }
+
+        let mut child = match Command::new(PKEXEC_PATH)
+            .arg(HELPER_PATH)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "pkexec not found at {PKEXEC_PATH}; install polkit/pkexec to use Linux hotkeys"
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("Failed to launch Linux hotkey helper through pkexec: {error}");
+                return;
+            }
+        };
+
+        let Some(stdout) = child.stdout.take() else {
+            eprintln!("Failed to capture Linux hotkey helper stdout");
+            return;
+        };
+
+        let reader = std::io::BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    eprintln!("Failed to read Linux hotkey helper event: {error}");
+                    break;
+                }
+            };
+
+            let event = match serde_json::from_str::<HelperHotkeyEvent>(&line) {
+                Ok(event) => event,
+                Err(error) => {
+                    eprintln!("Ignoring malformed Linux hotkey helper event {line:?}: {error}");
+                    continue;
+                }
+            };
+
+            let control = match event.event.as_str() {
+                "right_alt_press" => ControlMsg::SinglePress,
+                "right_alt_release" => ControlMsg::StopHold,
+                "space_press" => ControlMsg::SwitchToLatch,
+                other => {
+                    eprintln!("Ignoring unknown Linux hotkey helper event: {other}");
+                    continue;
+                }
+            };
+
+            let _ = proxy.send_event(AppEvent::Control(control));
+        }
+
+        match child.wait() {
+            Ok(status) => match status.code() {
+                Some(0) => eprintln!("Linux hotkey helper exited"),
+                Some(126) => {
+                    eprintln!("Linux hotkey helper authorization was cancelled by the user")
+                }
+                Some(127) => eprintln!(
+                    "Linux hotkey helper authorization failed or helper is unavailable. Reinstall with: scripts/install-linux-helper.sh"
+                ),
+                Some(code) => eprintln!("Linux hotkey helper exited with status code {code}"),
+                None => eprintln!("Linux hotkey helper was terminated by signal"),
+            },
+            Err(error) => eprintln!("Failed to wait for Linux hotkey helper: {error}"),
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
-    println!("  HOLD: Hold Right Option (⌥), release to transcribe");
-    println!(
-        "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        println!("  HOLD: Hold Right Option (⌥), release to transcribe");
+        println!(
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!("  HOLD: Hold Right Alt / AltGr, release to transcribe");
+        println!(
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Alt / AltGr again to stop"
+        );
+    }
     #[cfg(target_os = "macos")]
     {
         println!("Menu bar:");
