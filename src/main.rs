@@ -611,7 +611,7 @@ impl AudioManager {
     fn switch_to_latch_mode(&mut self) -> Result<bool, String> {
         if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
             self.mode = RecordingMode::Latch;
-            println!("Switched to LATCH mode - press Right Option/Alt to stop");
+            println!("Switched to LATCH mode - press the hold shortcut again to stop");
             Ok(true)
         } else {
             Ok(false)
@@ -1266,8 +1266,8 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
             };
 
             let control = match event.event.as_str() {
-                "right_alt_press" => ControlMsg::SinglePress,
-                "right_alt_release" => ControlMsg::StopHold,
+                "super_c_press" => ControlMsg::SinglePress,
+                "super_c_release" => ControlMsg::StopHold,
                 "space_press" => ControlMsg::SwitchToLatch,
                 other => {
                     eprintln!("Ignoring unknown Linux hotkey helper event: {other}");
@@ -1307,9 +1307,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(target_os = "linux")]
     {
-        println!("  HOLD: Hold Right Alt / AltGr, release to transcribe");
+        println!("  HOLD: Hold Super+C, release to transcribe");
         println!(
-            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Alt / AltGr again to stop"
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Super+C again to stop"
         );
     }
     #[cfg(target_os = "macos")]
