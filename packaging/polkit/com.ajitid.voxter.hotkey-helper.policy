@@ -10,6 +10,13 @@
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
+      <!--
+        auth_admin_keep is temporary and subject-based. With pkexec, the subject
+        can effectively be tied to the calling process context; after Voxter is
+        restarted, the next pkexec call may be a different subject. In that case
+        there is no matching kept authorization, so this behaves like auth_admin
+        and prompts again.
+      -->
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/voxter-hotkey-helper</annotate>

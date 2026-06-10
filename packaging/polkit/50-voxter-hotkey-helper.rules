@@ -1,0 +1,16 @@
+// Allow active local users in the 'wheel' group to run Voxter's hotkey
+// helper without a password, matching Show Me The Key's privileged-helper
+// policy model.
+//
+// The .policy file still uses auth_admin_keep as a fallback for users who do
+// not match this rule. Note that auth_admin_keep is temporary and subject-based:
+// pkexec authorization may be keyed to the calling process/session subject, so
+// restarting Voxter can create a different subject and prompt again even within
+// the keep window. Returning YES here is what provides reliable no-prompt
+// behavior for trusted wheel users.
+polkit.addRule(function(action, subject) {
+  if (action.id === "com.ajitid.voxter.hotkey-helper" &&
+      subject.isInGroup("wheel") && subject.local && subject.active) {
+    return polkit.Result.YES;
+  }
+});

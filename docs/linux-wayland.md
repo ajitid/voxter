@@ -18,6 +18,7 @@ This installs:
 
 - `/usr/local/libexec/voxter-hotkey-helper`
 - `/usr/share/polkit-1/actions/com.ajitid.voxter.hotkey-helper.policy`
+- `/usr/share/polkit-1/rules.d/50-voxter-hotkey-helper.rules`
 
 The helper is intentionally tiny. It reads raw input events and writes only these JSON-lines events to stdout:
 
@@ -29,19 +30,19 @@ The helper is intentionally tiny. It reads raw input events and writes only thes
 
 It does not send audio, transcripts, environment variables, or other app state.
 
-The polkit policy uses `auth_admin_keep` for active sessions, so your password may be remembered briefly after approval, commonly around five minutes. This is best-effort polkit behavior and may vary by distro/session.
+## Polkit authorization behavior
 
-## Optional passwordless local rule
-
-Trusted users can install a local polkit rule to skip prompts for this exact helper. For example:
+The installed rules file allows active local users in the `wheel` group to run the helper without a password:
 
 ```js
-// /etc/polkit-1/rules.d/50-voxter-hotkey-helper.rules
 polkit.addRule(function(action, subject) {
-  if (action.id == "com.ajitid.voxter.hotkey-helper" && subject.active && subject.local && subject.isInGroup("wheel")) {
+  if (action.id === "com.ajitid.voxter.hotkey-helper" &&
+      subject.isInGroup("wheel") && subject.local && subject.active) {
     return polkit.Result.YES;
   }
 });
 ```
 
-On Debian/Ubuntu-family systems the admin group may be `sudo` instead of `wheel`.
+This matches Show Me The Key's model. On Debian/Ubuntu-family systems the admin group may be `sudo` instead of `wheel`; adjust the installed rule locally if needed.
+
+The policy file still uses `auth_admin_keep` as a fallback for users who do not match the rules file. `auth_admin_keep` means a password may be remembered briefly, commonly around five minutes, but it is subject-based. With `pkexec`, restarting Voxter can create a new caller subject, so `auth_admin_keep` may still prompt on every app run even though one might expect it to remember compared to `auth_admin`.
