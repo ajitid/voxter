@@ -1,6 +1,3 @@
-#[cfg(not(target_os = "macos"))]
-compile_error!("This build currently supports macOS only (rdev + on-demand cursor query).");
-
 mod ui;
 
 use reqwest::blocking::multipart;
@@ -14,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
 use ui::overlay::{OverlayController, OverlayState};
+#[cfg(target_os = "macos")]
 use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
 use winit::application::ApplicationHandler;
@@ -88,6 +86,7 @@ enum ControlMsg {
 enum AppEvent {
     Control(ControlMsg),
     Overlay(OverlayState),
+    #[cfg(target_os = "macos")]
     TrayMenu(tray_icon::menu::MenuEvent),
     TranscriptUpdated,
 }
@@ -799,6 +798,7 @@ fn transcribe_audio_opus(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn last_transcription_text() -> Option<String> {
     let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
     last_transcription_arc
@@ -807,6 +807,7 @@ fn last_transcription_text() -> Option<String> {
         .and_then(|value| value.clone())
 }
 
+#[cfg(target_os = "macos")]
 fn type_last_transcript() -> Result<bool, String> {
     let Some(text) = last_transcription_text() else {
         return Ok(false);
@@ -975,6 +976,7 @@ struct App {
     audio_manager: AudioManager,
     overlay: Option<OverlayController>,
     overlay_window_id: Option<WindowId>,
+    #[cfg(target_os = "macos")]
     tray: Option<StatusTray>,
     proxy: EventLoopProxy<AppEvent>,
 }
@@ -985,6 +987,7 @@ impl App {
             audio_manager: AudioManager::new(),
             overlay: None,
             overlay_window_id: None,
+            #[cfg(target_os = "macos")]
             tray: None,
             proxy,
         }
@@ -1002,6 +1005,7 @@ impl App {
         });
     }
 
+    #[cfg(target_os = "macos")]
     fn refresh_tray_menu_state(&self) {
         if let Some(tray) = self.tray.as_ref() {
             let enabled = last_transcription_text().is_some();
@@ -1009,6 +1013,7 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn handle_tray_menu_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1093,13 +1098,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
-        if self.tray.is_none() {
-            match build_status_tray() {
-                Ok(tray) => self.tray = Some(tray),
-                Err(e) => eprintln!("Tray initialization failed: {e}"),
+        #[cfg(target_os = "macos")]
+        {
+            if self.tray.is_none() {
+                match build_status_tray() {
+                    Ok(tray) => self.tray = Some(tray),
+                    Err(e) => eprintln!("Tray initialization failed: {e}"),
+                }
             }
+            self.refresh_tray_menu_state();
         }
-        self.refresh_tray_menu_state();
         self.update_loop_mode(event_loop);
     }
 
@@ -1117,8 +1125,12 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.update_loop_mode(event_loop);
             }
+            #[cfg(target_os = "macos")]
             AppEvent::TrayMenu(event) => self.handle_tray_menu_event(event_loop, event),
-            AppEvent::TranscriptUpdated => self.refresh_tray_menu_state(),
+            AppEvent::TranscriptUpdated => {
+                #[cfg(target_os = "macos")]
+                self.refresh_tray_menu_state();
+            }
         }
     }
 
@@ -1164,8 +1176,11 @@ impl ApplicationHandler<AppEvent> for App {
 
 fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     thread::spawn(move || {
-        use rdev::{EventType, Key, set_is_main_thread};
+        #[cfg(target_os = "macos")]
+        use rdev::set_is_main_thread;
+        use rdev::{EventType, Key};
 
+        #[cfg(target_os = "macos")]
         set_is_main_thread(false);
 
         let callback = move |event: rdev::Event| match event.event_type {
@@ -1194,8 +1209,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
     );
-    println!("Menu bar:");
-    println!("  Use the microphone icon to type the last transcript or quit");
+    #[cfg(target_os = "macos")]
+    {
+        println!("Menu bar:");
+        println!("  Use the microphone icon to type the last transcript or quit");
+    }
     println!("Waiting for hotkey...");
 
     let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
@@ -1218,6 +1236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("failed to set Ctrl+C handler");
     }
 
+    #[cfg(target_os = "macos")]
     {
         let menu_proxy = proxy.clone();
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
