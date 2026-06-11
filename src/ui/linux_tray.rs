@@ -1,7 +1,7 @@
 use crate::{AppEvent, AppSender, ControlMsg};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
-use ksni::{Category, Icon, MenuItem, Status, ToolTip, Tray};
+use ksni::{Category, MenuItem, Status, ToolTip, Tray};
 
 pub struct LinuxStatusTray {
     handle: Handle<VoxterLinuxTray>,
@@ -9,11 +9,9 @@ pub struct LinuxStatusTray {
 
 impl LinuxStatusTray {
     pub fn new(sender: AppSender, has_last_transcript: bool) -> Result<Self, String> {
-        let icon = build_ksni_icon();
         let tray = VoxterLinuxTray {
             sender,
             has_last_transcript,
-            icon,
         };
         let handle = tray
             .spawn()
@@ -35,7 +33,6 @@ impl LinuxStatusTray {
 struct VoxterLinuxTray {
     sender: AppSender,
     has_last_transcript: bool,
-    icon: Icon,
 }
 
 impl Tray for VoxterLinuxTray {
@@ -57,8 +54,8 @@ impl Tray for VoxterLinuxTray {
         Status::Active
     }
 
-    fn icon_pixmap(&self) -> Vec<Icon> {
-        vec![self.icon.clone()]
+    fn icon_name(&self) -> String {
+        "voxter-symbolic".to_string()
     }
 
     fn tool_tip(&self) -> ToolTip {
@@ -92,19 +89,5 @@ impl Tray for VoxterLinuxTray {
             }
             .into(),
         ]
-    }
-}
-
-fn build_ksni_icon() -> Icon {
-    let rgba_icon = crate::ui::tray_art::build_status_icon_rgba();
-    let mut data = rgba_icon.rgba;
-    for pixel in data.chunks_exact_mut(4) {
-        pixel.rotate_right(1);
-    }
-
-    Icon {
-        width: rgba_icon.width as i32,
-        height: rgba_icon.height as i32,
-        data,
     }
 }

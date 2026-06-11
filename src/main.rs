@@ -4,7 +4,7 @@ use reqwest::blocking::multipart;
 use serde::Deserialize;
 use std::env;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -35,14 +35,44 @@ use winit::window::WindowId;
 static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
     std::sync::OnceLock::new();
 
-static ON_SOUND: &[u8] = include_bytes!("../assets/on.mp3");
-static OFF_SOUND: &[u8] = include_bytes!("../assets/off.mp3");
+#[cfg(target_os = "linux")]
+const LINUX_ON_SOUND_PATH: &str = "/usr/local/share/voxter/assets/on.mp3";
+#[cfg(target_os = "linux")]
+const LINUX_OFF_SOUND_PATH: &str = "/usr/local/share/voxter/assets/off.mp3";
+#[cfg(target_os = "linux")]
+const LINUX_TRAY_ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/status/voxter-symbolic.svg";
 
-fn play_sound(name: &'static str, bytes: &'static [u8]) {
+#[cfg(target_os = "macos")]
+const ON_SOUND_PATH: &str = "assets/on.mp3";
+#[cfg(target_os = "macos")]
+const OFF_SOUND_PATH: &str = "assets/off.mp3";
+
+#[cfg(target_os = "linux")]
+const ON_SOUND_PATH: &str = LINUX_ON_SOUND_PATH;
+#[cfg(target_os = "linux")]
+const OFF_SOUND_PATH: &str = LINUX_OFF_SOUND_PATH;
+
+#[cfg(target_os = "linux")]
+fn validate_linux_installed_assets() -> Result<(), String> {
+    for path in [
+        LINUX_ON_SOUND_PATH,
+        LINUX_OFF_SOUND_PATH,
+        LINUX_TRAY_ICON_PATH,
+    ] {
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!(
+                "Required Linux asset is missing: {path}. Install Voxter with: scripts/install-linux.sh"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn play_sound<P: AsRef<std::path::Path>>(path: P) {
+    let path = path.as_ref().to_path_buf();
     thread::spawn(move || {
         use rodio::Source;
         use rodio::stream::OutputStreamBuilder;
-        use std::io::Cursor;
         use std::time::Duration;
 
         let mut stream_handle = match OutputStreamBuilder::open_default_stream() {
@@ -57,7 +87,14 @@ fn play_sound(name: &'static str, bytes: &'static [u8]) {
 
         let mixer = stream_handle.mixer();
         let sink = rodio::Sink::connect_new(mixer);
-        let source = Cursor::new(bytes);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("Failed to open sound {}: {e}", path.display());
+                return;
+            }
+        };
+        let source = BufReader::new(file);
 
         match rodio::Decoder::new(source) {
             Ok(decoder) => {
@@ -70,7 +107,7 @@ fn play_sound(name: &'static str, bytes: &'static [u8]) {
                 // Block this thread until sound completes to keep stream alive
                 sink.sleep_until_end();
             }
-            Err(e) => eprintln!("Failed to decode embedded sound {name}: {e}"),
+            Err(e) => eprintln!("Failed to decode sound {}: {e}", path.display()),
         }
         // Dropping stream_handle here stops the mixer; after playback finished.
     });
@@ -305,7 +342,7 @@ impl AudioManager {
            it can take the audio system some time to get all the necessary resources from the system.
            On macOS it’s about 100-200ms but I haven’t measured on other platforms.
         */
-        play_sound("on.mp3", ON_SOUND);
+        play_sound(ON_SOUND_PATH);
 
         let mode_str = match mode {
             RecordingMode::Hold => "HOLD",
@@ -606,7 +643,7 @@ impl AudioManager {
                         Ok(has_speech) => {
                             if has_speech {
                                 sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                                play_sound("off.mp3", OFF_SOUND);
+                                play_sound(OFF_SOUND_PATH);
                                 println!("Processing transcription...");
                                 if let Err(e) =
                                     transcribe_audio_opus(opus_data, sender_clone.clone())
@@ -622,7 +659,7 @@ impl AudioManager {
                         Err(e) => {
                             eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
                             sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                            play_sound("off.mp3", OFF_SOUND);
+                            play_sound(OFF_SOUND_PATH);
                             println!("Processing transcription...");
                             if let Err(e) = transcribe_audio_opus(opus_data, sender_clone.clone()) {
                                 eprintln!("Failed to transcribe audio: {}", e);
@@ -1597,7 +1634,7 @@ fn spawn_hotkey_listener(sender: AppSender) {
 
         if !std::path::Path::new(HELPER_PATH).exists() {
             eprintln!(
-                "Linux hotkey helper not found at {HELPER_PATH}. Install it with: scripts/install-linux-helper.sh"
+                "Linux hotkey helper not found at {HELPER_PATH}. Install it with: scripts/install-linux.sh"
             );
             return;
         }
@@ -1663,7 +1700,7 @@ fn spawn_hotkey_listener(sender: AppSender) {
                     eprintln!("Linux hotkey helper authorization was cancelled by the user")
                 }
                 Some(127) => eprintln!(
-                    "Linux hotkey helper authorization failed or helper is unavailable. Reinstall with: scripts/install-linux-helper.sh"
+                    "Linux hotkey helper authorization failed or helper is unavailable. Reinstall with: scripts/install-linux.sh"
                 ),
                 Some(code) => eprintln!("Linux hotkey helper exited with status code {code}"),
                 None => eprintln!("Linux hotkey helper was terminated by signal"),
@@ -1813,6 +1850,7 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return Err("WAYLAND_DISPLAY is not set; Voxter Linux overlay requires Wayland".into());
     }
+    validate_linux_installed_assets()?;
 
     let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
     let sender = AppSender::Channel(tx);

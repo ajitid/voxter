@@ -5,31 +5,39 @@ On Linux/KDE, Voxter requires a working StatusNotifierItem system tray (for exam
 - `Type last transcript`
 - `Quit`
 
-Startup is strict: if Voxter cannot register the StatusNotifierItem tray, it exits instead of continuing without a tray.
+Startup is strict: if Voxter cannot find installed Linux assets or cannot register the StatusNotifierItem tray, it exits instead of continuing without a tray/icon/sounds.
 
-## Hotkey helper
+## Linux install
 
-On Linux, Voxter uses a small privileged helper for the global Left Control + Left Alt + Left Windows + J hotkey. Wayland does not generally allow regular desktop apps to read global keyboard events, so the main app launches the installed helper through `pkexec`.
+On Linux, Voxter requires installed runtime assets and a small privileged helper for the global Left Control + Left Alt + Left Windows + J hotkey. Wayland does not generally allow regular desktop apps to read global keyboard events, so the main app launches the installed helper through `pkexec`.
 
-Install it with:
-
-```sh
-scripts/install-linux-helper.sh
-```
-
-Uninstall it with:
+Install Voxter's Linux binaries and assets with:
 
 ```sh
-scripts/install-linux-helper.sh --uninstall
+scripts/install-linux.sh
 ```
+
+Uninstall them with:
+
+```sh
+scripts/install-linux.sh --uninstall
+```
+
+You can install or remove only selected parts with `--parts=helper,app-binary,app-assets`.
 
 This installs:
 
+- `/usr/local/bin/voxter`
 - `/usr/local/libexec/voxter-hotkey-helper`
+- `/usr/local/share/voxter/assets/on.mp3`
+- `/usr/local/share/voxter/assets/off.mp3`
+- `/usr/share/icons/hicolor/scalable/status/voxter-symbolic.svg`
 - `/usr/share/polkit-1/actions/com.ajitid.voxter.hotkey-helper.policy`
 - `/usr/share/polkit-1/rules.d/50-voxter-hotkey-helper.rules`
 
-The helper is intentionally tiny. It reads raw input events and writes only these JSON-lines events to stdout:
+Linux startup is strict. If any required runtime asset is missing, Voxter exits with an error; rerun `scripts/install-linux.sh` to reinstall them.
+
+The hotkey helper is intentionally tiny. It reads raw input events and writes only these JSON-lines events to stdout:
 
 ```json
 {"event":"hotkey_press"}
