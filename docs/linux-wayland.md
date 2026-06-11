@@ -1,4 +1,13 @@
-# Linux Wayland hotkey helper
+# Linux Wayland support
+
+On Linux/KDE, Voxter requires a working StatusNotifierItem system tray (for example, KDE Plasma's system tray). The tray menu provides:
+
+- `Type last transcript`
+- `Quit`
+
+Startup is strict: if Voxter cannot register the StatusNotifierItem tray, it exits instead of continuing without a tray.
+
+## Hotkey helper
 
 On Linux, Voxter uses a small privileged helper for the global Left Control + Left Alt + Left Windows + J hotkey. Wayland does not generally allow regular desktop apps to read global keyboard events, so the main app launches the installed helper through `pkexec`.
 

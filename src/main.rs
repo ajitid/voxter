@@ -12,6 +12,8 @@ use std::thread;
 use std::time::Instant;
 #[cfg(target_os = "linux")]
 use ui::linux_overlay::LinuxOverlayController;
+#[cfg(target_os = "linux")]
+use ui::linux_tray::LinuxStatusTray;
 #[cfg(target_os = "macos")]
 use ui::overlay::OverlayController;
 use ui::state::OverlayState;
@@ -87,7 +89,7 @@ enum ControlMsg {
     SinglePress,
     #[cfg(target_os = "macos")]
     SwitchToLatch,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     TypeLastTranscript,
     Quit,
 }
@@ -829,7 +831,7 @@ fn transcribe_audio_opus(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn last_transcription_text() -> Option<String> {
     let last_transcription_arc = LAST_TRANSCRIPTION.get_or_init(|| Arc::new(Mutex::new(None)));
     last_transcription_arc
@@ -838,7 +840,7 @@ fn last_transcription_text() -> Option<String> {
         .and_then(|value| value.clone())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn type_last_transcript() -> Result<bool, String> {
     let Some(text) = last_transcription_text() else {
         return Ok(false);
@@ -1677,6 +1679,7 @@ fn handle_linux_event(
     sender: &AppSender,
     audio_manager: &mut AudioManager,
     overlay: &mut LinuxOverlayController,
+    tray: &LinuxStatusTray,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match event {
         AppEvent::Control(msg) => match msg {
@@ -1697,6 +1700,14 @@ fn handle_linux_event(
                     sender.send(AppEvent::Overlay(OverlayState::Recording));
                 }
             }
+            ControlMsg::TypeLastTranscript => {
+                match type_last_transcript() {
+                    Ok(true) => println!("Typed last transcript"),
+                    Ok(false) => println!("No last transcript available to type"),
+                    Err(e) => eprintln!("Failed to type transcript: {e}"),
+                }
+                tray.refresh_type_item(last_transcription_text().is_some());
+            }
             ControlMsg::Quit => {
                 if audio_manager.recorder.is_recording()
                     && let Err(e) = audio_manager.stop_recording(sender.clone())
@@ -1705,6 +1716,7 @@ fn handle_linux_event(
                 }
                 shutdown_linux_typing_worker();
                 overlay.update_state(OverlayState::Hidden)?;
+                tray.shutdown();
                 return Ok(false);
             }
         },
@@ -1714,7 +1726,9 @@ fn handle_linux_event(
             }
             overlay.update_state(state)?;
         }
-        AppEvent::TranscriptUpdated => {}
+        AppEvent::TranscriptUpdated => {
+            tray.refresh_type_item(last_transcription_text().is_some());
+        }
     }
     Ok(true)
 }
@@ -1725,6 +1739,7 @@ fn linux_event_loop(
     sender: AppSender,
     audio_manager: &mut AudioManager,
     overlay: &mut LinuxOverlayController,
+    tray: &LinuxStatusTray,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut running = true;
     while running {
@@ -1738,11 +1753,12 @@ fn linux_event_loop(
 
         match rx.recv_timeout(timeout) {
             Ok(event) => {
-                running = handle_linux_event(event, &sender, audio_manager, overlay)?;
+                running = handle_linux_event(event, &sender, audio_manager, overlay, tray)?;
                 while running {
                     match rx.try_recv() {
                         Ok(event) => {
-                            running = handle_linux_event(event, &sender, audio_manager, overlay)?
+                            running =
+                                handle_linux_event(event, &sender, audio_manager, overlay, tray)?
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -1808,9 +1824,12 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     spawn_hotkey_listener(sender.clone());
 
+    let tray = LinuxStatusTray::new(sender.clone(), last_transcription_text().is_some())
+        .map_err(|e| format!("Failed to start Linux status tray: {e}"))?;
+
     let mut audio_manager = AudioManager::new();
     let mut overlay = LinuxOverlayController::new(Arc::clone(&audio_manager.speech_viz))?;
-    linux_event_loop(rx, sender, &mut audio_manager, &mut overlay)
+    linux_event_loop(rx, sender, &mut audio_manager, &mut overlay, &tray)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
