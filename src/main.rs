@@ -10,15 +10,23 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Instant;
-use ui::overlay::{OverlayController, OverlayState};
+#[cfg(target_os = "linux")]
+use ui::linux_overlay::LinuxOverlayController;
+#[cfg(target_os = "macos")]
+use ui::overlay::OverlayController;
+use ui::state::OverlayState;
 #[cfg(target_os = "macos")]
 use ui::tray::{StatusTray, build_status_tray};
 use voice_activity_detector::VoiceActivityDetector;
+#[cfg(target_os = "macos")]
 use winit::application::ApplicationHandler;
+#[cfg(target_os = "macos")]
 use winit::event::WindowEvent;
+#[cfg(target_os = "macos")]
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+#[cfg(target_os = "macos")]
 use winit::window::WindowId;
 
 // Global state for storing the last transcription
@@ -89,6 +97,29 @@ enum AppEvent {
     #[cfg(target_os = "macos")]
     TrayMenu(tray_icon::menu::MenuEvent),
     TranscriptUpdated,
+}
+
+#[derive(Clone)]
+enum AppSender {
+    #[cfg(target_os = "macos")]
+    Winit(EventLoopProxy<AppEvent>),
+    #[cfg(target_os = "linux")]
+    Channel(std::sync::mpsc::Sender<AppEvent>),
+}
+
+impl AppSender {
+    fn send(&self, event: AppEvent) {
+        match self {
+            #[cfg(target_os = "macos")]
+            AppSender::Winit(proxy) => {
+                let _ = proxy.send_event(event);
+            }
+            #[cfg(target_os = "linux")]
+            AppSender::Channel(tx) => {
+                let _ = tx.send(event);
+            }
+        }
+    }
 }
 
 pub(crate) struct SpeechVizState {
@@ -494,7 +525,7 @@ impl AudioManager {
         Ok(())
     }
 
-    fn stop_recording(&mut self, proxy: EventLoopProxy<AppEvent>) -> Result<(), String> {
+    fn stop_recording(&mut self, sender: AppSender) -> Result<(), String> {
         if !self.recorder.is_recording() {
             self.speech_viz.deactivate();
             return Ok(());
@@ -529,19 +560,19 @@ impl AudioManager {
                         let _ = rx.recv(); // Consume and discard
                     }
                 });
-                let _ = proxy.send_event(AppEvent::Overlay(OverlayState::Hidden));
+                sender.send(AppEvent::Overlay(OverlayState::Hidden));
                 return Ok(());
             }
 
             // During VAD analysis keep overlay hidden; show spinner only if transcription starts.
-            let _ = proxy.send_event(AppEvent::Overlay(OverlayState::Hidden));
+            sender.send(AppEvent::Overlay(OverlayState::Hidden));
 
             // Close the sender to signal worker end-of-stream
             if let Ok(mut guard) = self.recorder.tx.lock() {
                 guard.take();
             }
             let result_rx_arc = Arc::clone(&self.recorder.result_rx);
-            let proxy_clone = proxy.clone();
+            let sender_clone = sender.clone();
             std::thread::spawn(move || {
                 println!("Finalizing audio stream...");
                 let start = Instant::now();
@@ -569,38 +600,34 @@ impl AudioManager {
                     match check_speech_activity(&opus_data) {
                         Ok(has_speech) => {
                             if has_speech {
-                                let _ = proxy_clone
-                                    .send_event(AppEvent::Overlay(OverlayState::Transcribing));
+                                sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
                                 play_sound("assets/off.mp3");
                                 println!("Processing transcription...");
                                 if let Err(e) =
-                                    transcribe_audio_opus(opus_data, proxy_clone.clone())
+                                    transcribe_audio_opus(opus_data, sender_clone.clone())
                                 {
                                     eprintln!("Failed to transcribe audio: {}", e);
                                 }
-                                let _ =
-                                    proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
+                                sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
                             } else {
                                 println!("No speech detected, skipping transcription");
-                                let _ =
-                                    proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
+                                sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
                             }
                         }
                         Err(e) => {
                             eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
-                            let _ = proxy_clone
-                                .send_event(AppEvent::Overlay(OverlayState::Transcribing));
+                            sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
                             play_sound("assets/off.mp3");
                             println!("Processing transcription...");
-                            if let Err(e) = transcribe_audio_opus(opus_data, proxy_clone.clone()) {
+                            if let Err(e) = transcribe_audio_opus(opus_data, sender_clone.clone()) {
                                 eprintln!("Failed to transcribe audio: {}", e);
                             }
-                            let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
+                            sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
                         }
                     }
                 } else {
                     eprintln!("No audio data produced");
-                    let _ = proxy_clone.send_event(AppEvent::Overlay(OverlayState::Hidden));
+                    sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
                 }
             });
         }
@@ -733,7 +760,7 @@ fn parse_context_bias(context_bias: &str) -> Vec<String> {
 
 fn transcribe_audio_opus(
     opus_data: Vec<u8>,
-    proxy: EventLoopProxy<AppEvent>,
+    sender: AppSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
@@ -790,7 +817,7 @@ fn transcribe_audio_opus(
     if let Ok(mut last_transcription) = last_transcription_arc.lock() {
         *last_transcription = Some(clean_text.clone());
     }
-    let _ = proxy.send_event(AppEvent::TranscriptUpdated);
+    sender.send(AppEvent::TranscriptUpdated);
 
     // Type the transcript into the active window
     type_transcript(&clean_text);
@@ -849,15 +876,77 @@ fn try_type(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+const OPUS_SAMPLE_RATE: u32 = 48_000;
+
+struct LinearResamplerToOpusRate {
+    input_sample_rate: u32,
+    source_pos: f64,
+    previous_sample: Option<i16>,
+}
+
+impl LinearResamplerToOpusRate {
+    fn new(input_sample_rate: u32) -> Self {
+        Self {
+            input_sample_rate,
+            source_pos: 0.0,
+            previous_sample: None,
+        }
+    }
+
+    fn process(&mut self, input: &[i16]) -> Vec<i16> {
+        if self.input_sample_rate == OPUS_SAMPLE_RATE {
+            return input.to_vec();
+        }
+        if input.is_empty() {
+            return Vec::new();
+        }
+
+        let mut samples =
+            Vec::with_capacity(input.len() + usize::from(self.previous_sample.is_some()));
+        if let Some(previous_sample) = self.previous_sample {
+            samples.push(previous_sample);
+        }
+        samples.extend_from_slice(input);
+
+        let step = self.input_sample_rate as f64 / OPUS_SAMPLE_RATE as f64;
+        let mut output = Vec::with_capacity(
+            ((input.len() as f64) * OPUS_SAMPLE_RATE as f64 / self.input_sample_rate as f64).ceil()
+                as usize,
+        );
+
+        while self.source_pos + 1.0 < samples.len() as f64 {
+            let i = self.source_pos.floor() as usize;
+            let frac = (self.source_pos - i as f64) as f32;
+            let a = samples[i] as f32;
+            let b = samples[i + 1] as f32;
+            output.push(
+                (a + ((b - a) * frac))
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            );
+            self.source_pos += step;
+        }
+
+        self.previous_sample = input.last().copied();
+        self.source_pos -= (samples.len() - 1) as f64;
+        output
+    }
+}
+
 fn run_opus_worker(
     rx: flume::Receiver<Vec<i16>>,
     result_tx: flume::Sender<Vec<u8>>,
     sample_rate: u32,
 ) -> Result<(), String> {
-    // Configure Opus encoder for mono speech
-    let mut encoder =
-        opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
+    // Opus encoders only accept 8/12/16/24/48 kHz input. Encode at 48 kHz and
+    // resample capture devices such as 44.1 kHz mics before feeding libopus.
+    let mut resampler = LinearResamplerToOpusRate::new(sample_rate);
+    let mut encoder = opus::Encoder::new(
+        OPUS_SAMPLE_RATE,
+        opus::Channels::Mono,
+        opus::Application::Voip,
+    )
+    .map_err(|e| format!("Failed to create Opus encoder: {}", e))?;
     encoder
         .set_bitrate(opus::Bitrate::Bits(24000))
         .map_err(|e| format!("Failed to set bitrate: {}", e))?;
@@ -877,7 +966,7 @@ fn run_opus_worker(
     opus_head.push(1);
     opus_head.push(1u8); // mono
     opus_head.extend_from_slice(&0u16.to_le_bytes());
-    opus_head.extend_from_slice(&sample_rate.to_le_bytes());
+    opus_head.extend_from_slice(&OPUS_SAMPLE_RATE.to_le_bytes());
     opus_head.extend_from_slice(&0u16.to_le_bytes());
     opus_head.push(0);
     writer
@@ -906,19 +995,18 @@ fn run_opus_worker(
         .map_err(|e| format!("Failed to write Opus comments: {}", e))?;
 
     // Stream frames
-    let frame_size: usize = (sample_rate as usize) / 50; // 20ms frames
+    let frame_size: usize = (OPUS_SAMPLE_RATE as usize) / 50; // 20ms frames
     let mut out_buf = [0u8; 4000];
     let mut granulepos: u64 = 0;
     let mut accum: Vec<i16> = Vec::with_capacity(frame_size * 2);
-    while let Ok(mut chunk) = rx.recv() {
-        accum.append(&mut chunk);
+    while let Ok(chunk) = rx.recv() {
+        accum.extend(resampler.process(&chunk));
         while accum.len() >= frame_size {
             let frame: Vec<i16> = accum.drain(..frame_size).collect();
             match encoder.encode(&frame, &mut out_buf) {
                 Ok(len) => {
                     let packet = out_buf[..len].to_vec();
-                    granulepos = granulepos
-                        .saturating_add((frame_size as u64) * 48_000u64 / (sample_rate as u64));
+                    granulepos = granulepos.saturating_add(frame_size as u64);
                     writer
                         .write_packet(
                             packet,
@@ -945,8 +1033,7 @@ fn run_opus_worker(
         }
         if let Ok(len) = encoder.encode(&frame, &mut out_buf) {
             let packet = out_buf[..len].to_vec();
-            granulepos =
-                granulepos.saturating_add((frame_size as u64) * 48_000u64 / (sample_rate as u64));
+            granulepos = granulepos.saturating_add(frame_size as u64);
             writer
                 .write_packet(
                     packet,
@@ -972,24 +1059,27 @@ fn run_opus_worker(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 struct App {
     audio_manager: AudioManager,
     overlay: Option<OverlayController>,
     overlay_window_id: Option<WindowId>,
     #[cfg(target_os = "macos")]
     tray: Option<StatusTray>,
-    proxy: EventLoopProxy<AppEvent>,
+    sender: AppSender,
 }
 
+#[cfg(target_os = "macos")]
 impl App {
     fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+        let sender = AppSender::Winit(proxy);
         Self {
             audio_manager: AudioManager::new(),
             overlay: None,
             overlay_window_id: None,
             #[cfg(target_os = "macos")]
             tray: None,
-            proxy,
+            sender,
         }
     }
 
@@ -1040,7 +1130,7 @@ impl App {
             ControlMsg::StopHold => {
                 if self.audio_manager.recorder.is_recording()
                     && self.audio_manager.mode == RecordingMode::Hold
-                    && let Err(e) = self.audio_manager.stop_recording(self.proxy.clone())
+                    && let Err(e) = self.audio_manager.stop_recording(self.sender.clone())
                 {
                     eprintln!("Failed to stop recording: {}", e);
                 }
@@ -1049,7 +1139,7 @@ impl App {
                 if self.audio_manager.recorder.is_recording()
                     && self.audio_manager.mode == RecordingMode::Latch
                 {
-                    if let Err(e) = self.audio_manager.stop_recording(self.proxy.clone()) {
+                    if let Err(e) = self.audio_manager.stop_recording(self.sender.clone()) {
                         eprintln!("Failed to stop recording: {}", e);
                     }
                 } else if !self.audio_manager.recorder.is_recording()
@@ -1057,35 +1147,31 @@ impl App {
                 {
                     eprintln!("Failed to start hold recording: {}", e);
                 } else {
-                    let _ = self
-                        .proxy
-                        .send_event(AppEvent::Overlay(OverlayState::Recording));
+                    self.sender.send(AppEvent::Overlay(OverlayState::Recording));
                 }
             }
             ControlMsg::SwitchToLatch => match self.audio_manager.switch_to_latch_mode() {
                 Ok(true) => {
-                    let _ = self
-                        .proxy
-                        .send_event(AppEvent::Overlay(OverlayState::RecordingLatch));
+                    self.sender
+                        .send(AppEvent::Overlay(OverlayState::RecordingLatch));
                 }
                 Ok(false) => {}
                 Err(e) => eprintln!("Failed to switch to latch mode: {}", e),
             },
             ControlMsg::Quit => {
                 if self.audio_manager.recorder.is_recording()
-                    && let Err(e) = self.audio_manager.stop_recording(self.proxy.clone())
+                    && let Err(e) = self.audio_manager.stop_recording(self.sender.clone())
                 {
                     eprintln!("Failed to stop recording: {}", e);
                 }
-                let _ = self
-                    .proxy
-                    .send_event(AppEvent::Overlay(OverlayState::Hidden));
+                self.sender.send(AppEvent::Overlay(OverlayState::Hidden));
                 event_loop.exit();
             }
         }
     }
 }
 
+#[cfg(target_os = "macos")]
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.overlay.is_none() {
@@ -1175,7 +1261,7 @@ impl ApplicationHandler<AppEvent> for App {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
+fn spawn_hotkey_listener(sender: AppSender) {
     thread::spawn(move || {
         use rdev::set_is_main_thread;
         use rdev::{EventType, Key};
@@ -1184,13 +1270,13 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
 
         let callback = move |event: rdev::Event| match event.event_type {
             EventType::KeyPress(Key::AltGr) => {
-                let _ = proxy.send_event(AppEvent::Control(ControlMsg::SinglePress));
+                sender.send(AppEvent::Control(ControlMsg::SinglePress));
             }
             EventType::KeyRelease(Key::AltGr) => {
-                let _ = proxy.send_event(AppEvent::Control(ControlMsg::StopHold));
+                sender.send(AppEvent::Control(ControlMsg::StopHold));
             }
             EventType::KeyPress(Key::Space) => {
-                let _ = proxy.send_event(AppEvent::Control(ControlMsg::SwitchToLatch));
+                sender.send(AppEvent::Control(ControlMsg::SwitchToLatch));
             }
             _ => {}
         };
@@ -1208,7 +1294,7 @@ struct HelperHotkeyEvent {
 }
 
 #[cfg(target_os = "linux")]
-fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
+fn spawn_hotkey_listener(sender: AppSender) {
     const PKEXEC_PATH: &str = "/usr/bin/pkexec";
     const HELPER_PATH: &str = "/usr/local/libexec/voxter-hotkey-helper";
 
@@ -1266,8 +1352,8 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
             };
 
             let control = match event.event.as_str() {
-                "super_c_press" => ControlMsg::SinglePress,
-                "super_c_release" => ControlMsg::StopHold,
+                "hotkey_press" => ControlMsg::SinglePress,
+                "hotkey_release" => ControlMsg::StopHold,
                 "space_press" => ControlMsg::SwitchToLatch,
                 other => {
                     eprintln!("Ignoring unknown Linux hotkey helper event: {other}");
@@ -1275,7 +1361,7 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
                 }
             };
 
-            let _ = proxy.send_event(AppEvent::Control(control));
+            sender.send(AppEvent::Control(control));
         }
 
         match child.wait() {
@@ -1295,6 +1381,158 @@ fn spawn_hotkey_listener(proxy: EventLoopProxy<AppEvent>) {
     });
 }
 
+#[cfg(target_os = "linux")]
+fn handle_linux_event(
+    event: AppEvent,
+    sender: &AppSender,
+    audio_manager: &mut AudioManager,
+    overlay: &mut LinuxOverlayController,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match event {
+        AppEvent::Control(msg) => match msg {
+            ControlMsg::StopHold => {
+                if audio_manager.recorder.is_recording()
+                    && audio_manager.mode == RecordingMode::Hold
+                    && let Err(e) = audio_manager.stop_recording(sender.clone())
+                {
+                    eprintln!("Failed to stop recording: {e}");
+                }
+            }
+            ControlMsg::SinglePress => {
+                if audio_manager.recorder.is_recording()
+                    && audio_manager.mode == RecordingMode::Latch
+                {
+                    if let Err(e) = audio_manager.stop_recording(sender.clone()) {
+                        eprintln!("Failed to stop recording: {e}");
+                    }
+                } else if !audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.start_recording(RecordingMode::Hold)
+                {
+                    eprintln!("Failed to start hold recording: {e}");
+                } else {
+                    sender.send(AppEvent::Overlay(OverlayState::Recording));
+                }
+            }
+            ControlMsg::SwitchToLatch => match audio_manager.switch_to_latch_mode() {
+                Ok(true) => sender.send(AppEvent::Overlay(OverlayState::RecordingLatch)),
+                Ok(false) => {}
+                Err(e) => eprintln!("Failed to switch to latch mode: {e}"),
+            },
+            ControlMsg::Quit => {
+                if audio_manager.recorder.is_recording()
+                    && let Err(e) = audio_manager.stop_recording(sender.clone())
+                {
+                    eprintln!("Failed to stop recording: {e}");
+                }
+                overlay.update_state(OverlayState::Hidden)?;
+                return Ok(false);
+            }
+        },
+        AppEvent::Overlay(state) => {
+            if state == OverlayState::Hidden {
+                audio_manager.speech_viz.reset();
+            }
+            overlay.update_state(state)?;
+        }
+        AppEvent::TranscriptUpdated => {}
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_event_loop(
+    rx: std::sync::mpsc::Receiver<AppEvent>,
+    sender: AppSender,
+    audio_manager: &mut AudioManager,
+    overlay: &mut LinuxOverlayController,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut running = true;
+    while running {
+        overlay.dispatch_pending()?;
+
+        let timeout = if overlay.is_visible() {
+            std::time::Duration::from_millis(16)
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+
+        match rx.recv_timeout(timeout) {
+            Ok(event) => {
+                running = handle_linux_event(event, &sender, audio_manager, overlay)?;
+                while running {
+                    match rx.try_recv() {
+                        Ok(event) => {
+                            running = handle_linux_event(event, &sender, audio_manager, overlay)?
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if overlay.is_visible() {
+            overlay.redraw_if_visible()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_app() -> Result<(), Box<dyn std::error::Error>> {
+    let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
+    event_loop_builder
+        .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false);
+    let event_loop = event_loop_builder.build()?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = event_loop.create_proxy();
+
+    {
+        let quit_proxy = proxy.clone();
+        ctrlc::set_handler(move || {
+            let _ = quit_proxy.send_event(AppEvent::Control(ControlMsg::Quit));
+        })?;
+    }
+
+    {
+        let menu_proxy = proxy.clone();
+        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = menu_proxy.send_event(AppEvent::TrayMenu(event));
+        }));
+    }
+
+    spawn_hotkey_listener(AppSender::Winit(proxy.clone()));
+
+    let mut app = App::new(proxy);
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_app() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err("WAYLAND_DISPLAY is not set; Voxter Linux overlay requires Wayland".into());
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
+    let sender = AppSender::Channel(tx);
+
+    {
+        let quit_sender = sender.clone();
+        ctrlc::set_handler(move || quit_sender.send(AppEvent::Control(ControlMsg::Quit)))?;
+    }
+
+    spawn_hotkey_listener(sender.clone());
+
+    let mut audio_manager = AudioManager::new();
+    let mut overlay = LinuxOverlayController::new(Arc::clone(&audio_manager.speech_viz))?;
+    linux_event_loop(rx, sender, &mut audio_manager, &mut overlay)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mistral Voxtral Speech-to-Text");
     println!("Recording modes:");
@@ -1307,9 +1545,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(target_os = "linux")]
     {
-        println!("  HOLD: Hold Super+C, release to transcribe");
+        println!("  HOLD: Hold Left Control + Alt + Windows + H, release to transcribe");
         println!(
-            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Super+C again to stop"
+            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Left Control + Alt + Windows + H again to stop"
         );
     }
     #[cfg(target_os = "macos")]
@@ -1319,37 +1557,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Waiting for hotkey...");
 
-    let mut event_loop_builder = EventLoop::<AppEvent>::with_user_event();
-    #[cfg(target_os = "macos")]
-    {
-        event_loop_builder
-            .with_activation_policy(ActivationPolicy::Accessory)
-            .with_activate_ignoring_other_apps(false);
-    }
-    let event_loop = event_loop_builder.build()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    let proxy = event_loop.create_proxy();
-
-    {
-        let quit_proxy = proxy.clone();
-        ctrlc::set_handler(move || {
-            let _ = quit_proxy.send_event(AppEvent::Control(ControlMsg::Quit));
-        })
-        .expect("failed to set Ctrl+C handler");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let menu_proxy = proxy.clone();
-        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
-            let _ = menu_proxy.send_event(AppEvent::TrayMenu(event));
-        }));
-    }
-
-    spawn_hotkey_listener(proxy.clone());
-
-    let mut app = App::new(proxy);
-    event_loop.run_app(&mut app)?;
-    Ok(())
+    run_app()
 }

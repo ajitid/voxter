@@ -39,4 +39,6 @@ tray-icon = "0.22.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 enigo = { version = "0.6", default-features = false, features = ["wayland"] }
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2", features = ["wayland"] }
+smithay-client-toolkit = "0.20.0"
+wayland-client = "0.31.1"
 

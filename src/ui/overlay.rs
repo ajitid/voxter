@@ -1,5 +1,6 @@
 use crate::SpeechVizState;
 use crate::ui::render::OverlayRenderer;
+use crate::ui::state::OverlayState;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::{LogicalSize, PhysicalPosition, Position};
@@ -10,14 +11,6 @@ use winit::window::{Window, WindowLevel};
 
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayState {
-    Hidden,
-    Recording,
-    RecordingLatch,
-    Transcribing,
-}
 
 pub struct OverlayController {
     window: Arc<Window>,
