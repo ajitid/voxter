@@ -33,11 +33,14 @@ use winit::window::WindowId;
 static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
     std::sync::OnceLock::new();
 
-fn play_sound<P: AsRef<std::path::Path>>(path: P) {
-    let path_buf = path.as_ref().to_path_buf();
+static ON_SOUND: &[u8] = include_bytes!("../assets/on.mp3");
+static OFF_SOUND: &[u8] = include_bytes!("../assets/off.mp3");
+
+fn play_sound(name: &'static str, bytes: &'static [u8]) {
     thread::spawn(move || {
         use rodio::Source;
         use rodio::stream::OutputStreamBuilder;
+        use std::io::Cursor;
         use std::time::Duration;
 
         let mut stream_handle = match OutputStreamBuilder::open_default_stream() {
@@ -52,25 +55,20 @@ fn play_sound<P: AsRef<std::path::Path>>(path: P) {
 
         let mixer = stream_handle.mixer();
         let sink = rodio::Sink::connect_new(mixer);
+        let source = Cursor::new(bytes);
 
-        match std::fs::File::open(&path_buf) {
-            Ok(file) => {
-                let source = std::io::BufReader::new(file);
-                match rodio::Decoder::new(source) {
-                    Ok(decoder) => {
-                        // Prepend silence to avoid cut-in at playback start
-                        let silence = rodio::source::SineWave::new(440.0)
-                            .take_duration(Duration::from_millis(100))
-                            .amplify(0.0);
-                        sink.append(silence);
-                        sink.append(decoder);
-                        // Block this thread until sound completes to keep stream alive
-                        sink.sleep_until_end();
-                    }
-                    Err(e) => eprintln!("Failed to decode sound {}: {}", path_buf.display(), e),
-                }
+        match rodio::Decoder::new(source) {
+            Ok(decoder) => {
+                // Prepend silence to avoid cut-in at playback start
+                let silence = rodio::source::SineWave::new(440.0)
+                    .take_duration(Duration::from_millis(100))
+                    .amplify(0.0);
+                sink.append(silence);
+                sink.append(decoder);
+                // Block this thread until sound completes to keep stream alive
+                sink.sleep_until_end();
             }
-            Err(e) => eprintln!("Failed to open sound {}: {}", path_buf.display(), e),
+            Err(e) => eprintln!("Failed to decode embedded sound {name}: {e}"),
         }
         // Dropping stream_handle here stops the mixer; after playback finished.
     });
@@ -301,7 +299,7 @@ impl AudioManager {
            it can take the audio system some time to get all the necessary resources from the system.
            On macOS it’s about 100-200ms but I haven’t measured on other platforms.
         */
-        play_sound("assets/on.mp3");
+        play_sound("on.mp3", ON_SOUND);
 
         let mode_str = match mode {
             RecordingMode::Hold => "HOLD",
@@ -601,7 +599,7 @@ impl AudioManager {
                         Ok(has_speech) => {
                             if has_speech {
                                 sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                                play_sound("assets/off.mp3");
+                                play_sound("off.mp3", OFF_SOUND);
                                 println!("Processing transcription...");
                                 if let Err(e) =
                                     transcribe_audio_opus(opus_data, sender_clone.clone())
@@ -617,7 +615,7 @@ impl AudioManager {
                         Err(e) => {
                             eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
                             sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                            play_sound("assets/off.mp3");
+                            play_sound("off.mp3", OFF_SOUND);
                             println!("Processing transcription...");
                             if let Err(e) = transcribe_audio_opus(opus_data, sender_clone.clone()) {
                                 eprintln!("Failed to transcribe audio: {}", e);
