@@ -1027,7 +1027,21 @@ fn save_eitype_restore_token(token: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn try_type(text: &str) -> Result<(), String> {
+enum LinuxTypingMsg {
+    Type {
+        text: String,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    Shutdown,
+}
+
+#[cfg(target_os = "linux")]
+static LINUX_TYPING_WORKER: std::sync::OnceLock<
+    Mutex<Option<std::sync::mpsc::Sender<LinuxTypingMsg>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn connect_eitype_with_saved_token() -> Result<eitype::EiType, String> {
     use eitype::{EiType, EiTypeConfig};
 
     let saved_token = load_eitype_restore_token()?;
@@ -1048,11 +1062,100 @@ fn try_type(text: &str) -> Result<(), String> {
         return Err(error);
     }
 
-    let result = typer
-        .type_text(text)
-        .map_err(|e| format!("eitype text error: {e}"));
-    typer.close();
-    result
+    Ok(typer)
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_typing_worker(rx: std::sync::mpsc::Receiver<LinuxTypingMsg>) {
+    let mut typer: Option<eitype::EiType> = None;
+
+    while let Ok(message) = rx.recv() {
+        match message {
+            LinuxTypingMsg::Type { text, response } => {
+                let result = (|| {
+                    if typer.is_none() {
+                        typer = Some(connect_eitype_with_saved_token()?);
+                    }
+
+                    let active_typer = typer
+                        .as_ref()
+                        .ok_or_else(|| "eitype worker has no active connection".to_string())?;
+
+                    if let Err(error) = active_typer
+                        .type_text(&text)
+                        .map_err(|e| format!("eitype text error: {e}"))
+                    {
+                        if let Some(mut stale_typer) = typer.take() {
+                            stale_typer.close();
+                        }
+                        return Err(error);
+                    }
+
+                    Ok(())
+                })();
+
+                let _ = response.send(result);
+            }
+            LinuxTypingMsg::Shutdown => break,
+        }
+    }
+
+    if let Some(mut active_typer) = typer {
+        active_typer.close();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_typing_worker_sender() -> std::sync::mpsc::Sender<LinuxTypingMsg> {
+    let worker_slot = LINUX_TYPING_WORKER.get_or_init(|| Mutex::new(None));
+    let mut worker = worker_slot
+        .lock()
+        .expect("Linux eitype typing worker mutex poisoned");
+
+    if let Some(sender) = worker.as_ref() {
+        return sender.clone();
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<LinuxTypingMsg>();
+    std::thread::spawn(move || run_linux_typing_worker(rx));
+    *worker = Some(tx.clone());
+    tx
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_linux_typing_worker() {
+    let Some(worker_slot) = LINUX_TYPING_WORKER.get() else {
+        return;
+    };
+
+    let mut worker = match worker_slot.lock() {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("Linux eitype typing worker mutex poisoned during shutdown: {error}");
+            return;
+        }
+    };
+
+    if let Some(sender) = worker.take() {
+        let _ = sender.send(LinuxTypingMsg::Shutdown);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_type(text: &str) -> Result<(), String> {
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    let sender = linux_typing_worker_sender();
+
+    sender
+        .send(LinuxTypingMsg::Type {
+            text: text.to_string(),
+            response: response_tx,
+        })
+        .map_err(|_| "Linux eitype typing worker is not running".to_string())?;
+
+    response_rx
+        .recv()
+        .map_err(|_| "Linux eitype typing worker exited before returning a result".to_string())?
 }
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
@@ -1603,6 +1706,7 @@ fn handle_linux_event(
                 {
                     eprintln!("Failed to stop recording: {e}");
                 }
+                shutdown_linux_typing_worker();
                 overlay.update_state(OverlayState::Hidden)?;
                 return Ok(false);
             }

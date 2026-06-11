@@ -50,6 +50,8 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/voxter/eitype-restore-token
 
 `XDG_STATE_HOME` must be absolute when set. If it is unset, empty, or relative, Voxter uses `$HOME/.local/state`. Token persistence is strict: token read/write/path errors fail typing instead of silently falling back to a prompt-every-time flow.
 
+Within a single Voxter run, Voxter keeps one eitype RemoteDesktop session open and reuses it for subsequent typing requests. This avoids starting a new portal session for every transcription, which reduces repeated KDE "Remote control session started" notifications. KDE may still show an active remote-control indicator while Voxter is running; quit Voxter to close the session.
+
 Keyboard layout can be influenced with eitype/XKB environment variables such as `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, `XKB_DEFAULT_MODEL`, and `XKB_DEFAULT_OPTIONS`.
 
 ## Polkit authorization behavior
