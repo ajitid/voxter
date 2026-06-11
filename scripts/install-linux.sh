@@ -168,8 +168,10 @@ prompt_and_store_user_settings() {
   install -d -m 700 "$config_dir"
 
   if existing_api_key="$(secret-tool lookup application voxter key api-key 2>/dev/null)" && [[ -n "$existing_api_key" ]]; then
-    prompt="Enter VOXTER_API_KEY (leave blank to keep existing Secret Service item): "
+    echo "Current VOXTER_API_KEY: ****${existing_api_key: -4}"
+    prompt="Enter VOXTER_API_KEY (Enter=keep existing): "
   else
+    echo "Current VOXTER_API_KEY: <not set>"
     prompt="Enter VOXTER_API_KEY: "
   fi
 
@@ -189,8 +191,15 @@ prompt_and_store_user_settings() {
     echo "VOXTER_API_KEY is required for the systemd user service."
   done
 
-  read -r -p "Enter VOXTER_CONTEXT_BIAS (optional, leave blank to skip/keep existing): " context_bias
-  if [[ -n "$context_bias" ]]; then
+  if [[ -s "$context_bias_path" ]]; then
+    echo "Current VOXTER_CONTEXT_BIAS: $(<"$context_bias_path")"
+  else
+    echo "Current VOXTER_CONTEXT_BIAS: <not set>"
+  fi
+  read -r -p "Enter VOXTER_CONTEXT_BIAS (Enter=keep, '-'=clear, anything else=new value): " context_bias
+  if [[ "$context_bias" == "-" ]]; then
+    rm -f "$context_bias_path"
+  elif [[ -n "$context_bias" ]]; then
     printf '%s\n' "$context_bias" >"$context_bias_path"
     chmod 600 "$context_bias_path"
   fi

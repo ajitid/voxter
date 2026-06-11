@@ -34,6 +34,12 @@ use winit::window::WindowId;
 // Global state for storing the last transcription
 static LAST_TRANSCRIPTION: std::sync::OnceLock<Arc<Mutex<Option<String>>>> =
     std::sync::OnceLock::new();
+static APP_CONFIG: std::sync::OnceLock<AppConfig> = std::sync::OnceLock::new();
+
+struct AppConfig {
+    api_key: String,
+    context_bias: Option<String>,
+}
 
 #[cfg(target_os = "linux")]
 const LINUX_ON_SOUND_PATH: &str = "/usr/local/share/voxter/assets/on.mp3";
@@ -830,14 +836,30 @@ fn load_context_bias() -> Result<Option<String>, String> {
         .filter(|value| !value.is_empty()))
 }
 
+fn initialize_app_config() -> Result<(), String> {
+    dotenvy::dotenv().ok();
+
+    let config = AppConfig {
+        api_key: load_api_key()?,
+        context_bias: load_context_bias()?,
+    };
+
+    APP_CONFIG
+        .set(config)
+        .map_err(|_| "Voxter app config was already initialized".to_string())
+}
+
+fn app_config() -> Result<&'static AppConfig, std::io::Error> {
+    APP_CONFIG
+        .get()
+        .ok_or_else(|| std::io::Error::other("Voxter app config was not initialized"))
+}
+
 fn transcribe_audio_opus(
     opus_data: Vec<u8>,
     sender: AppSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-
-    let api_key = load_api_key().map_err(std::io::Error::other)?;
-    let context_bias = load_context_bias().map_err(std::io::Error::other)?;
+    let config = app_config()?;
 
     let client = reqwest::blocking::Client::new();
 
@@ -852,7 +874,7 @@ fn transcribe_audio_opus(
         );
 
     // Add context bias terms as array (each term gets its own form field)
-    if let Some(bias) = context_bias.as_deref() {
+    if let Some(bias) = config.context_bias.as_deref() {
         for term in parse_context_bias(bias) {
             form = form.text("context_bias", term);
         }
@@ -863,7 +885,7 @@ fn transcribe_audio_opus(
 
     let response = client
         .post("https://api.mistral.ai/v1/audio/transcriptions")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {}", config.api_key))
         .multipart(form)
         .send()?;
 
@@ -1919,6 +1941,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Menu bar:");
         println!("  Use the microphone icon to type the last transcript or quit");
     }
+    initialize_app_config().map_err(std::io::Error::other)?;
     println!("Waiting for hotkey...");
 
     run_app()
