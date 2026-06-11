@@ -879,16 +879,174 @@ fn try_type(text: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+fn eitype_state_home() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+
+    if let Some(value) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+    }
+
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "Unable to resolve eitype restore-token path: HOME is unset".to_string())?;
+
+    if !home.is_absolute() {
+        return Err(format!(
+            "Unable to resolve eitype restore-token path: HOME is not absolute: {}",
+            home.display()
+        ));
+    }
+
+    Ok(home.join(".local").join("state"))
+}
+
+#[cfg(target_os = "linux")]
+fn eitype_restore_token_path() -> Result<std::path::PathBuf, String> {
+    Ok(eitype_state_home()?
+        .join("voxter")
+        .join("eitype-restore-token"))
+}
+
+#[cfg(target_os = "linux")]
+fn load_eitype_restore_token() -> Result<Option<String>, String> {
+    use std::fs;
+    use std::io::ErrorKind;
+
+    let path = eitype_restore_token_path()?;
+    match fs::read_to_string(&path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(token))
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Failed to read eitype restore token from {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn save_eitype_restore_token(token: &str) -> Result<(), String> {
+    use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+    let path = eitype_restore_token_path()?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Failed to resolve parent directory for eitype restore token path: {}",
+            path.display()
+        )
+    })?;
+
+    let mut dir_builder = fs::DirBuilder::new();
+    dir_builder.recursive(true).mode(0o700);
+    dir_builder.create(parent).map_err(|error| {
+        format!(
+            "Failed to create eitype restore-token directory {}: {error}",
+            parent.display()
+        )
+    })?;
+
+    let temp_path = path.with_extension("tmp");
+    match fs::remove_file(&temp_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to remove stale eitype restore-token temp file {}: {error}",
+                temp_path.display()
+            ));
+        }
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp_path)
+        .map_err(|error| {
+            format!(
+                "Failed to create eitype restore-token temp file {}: {error}",
+                temp_path.display()
+            )
+        })?;
+
+    file.write_all(token.as_bytes()).map_err(|error| {
+        format!(
+            "Failed to write eitype restore token to {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    file.write_all(b"\n").map_err(|error| {
+        format!(
+            "Failed to write eitype restore token newline to {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "Failed to sync eitype restore-token temp file {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    drop(file);
+
+    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        format!(
+            "Failed to set eitype restore-token temp file permissions on {}: {error}",
+            temp_path.display()
+        )
+    })?;
+
+    fs::rename(&temp_path, &path).map_err(|error| {
+        format!(
+            "Failed to move eitype restore-token temp file {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        format!(
+            "Failed to set eitype restore-token file permissions on {}: {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn try_type(text: &str) -> Result<(), String> {
     use eitype::{EiType, EiTypeConfig};
 
-    let mut typer = EiType::connect_portal(EiTypeConfig::from_env()).map_err(|e| {
-        format!(
-            "eitype portal connection error: {e}. \
-             Ensure xdg-desktop-portal and xdg-desktop-portal-kde are installed/running, \
-             and approve the remote-control prompt if shown."
-        )
-    })?;
+    let saved_token = load_eitype_restore_token()?;
+    let (mut typer, new_token) =
+        EiType::connect_portal_with_token(EiTypeConfig::from_env(), saved_token.as_deref())
+            .map_err(|e| {
+                format!(
+                    "eitype portal connection error: {e}. \
+                     Ensure xdg-desktop-portal and xdg-desktop-portal-kde are installed/running, \
+                     and approve the remote-control prompt if shown."
+                )
+            })?;
+
+    if let Some(token) = new_token.as_deref()
+        && let Err(error) = save_eitype_restore_token(token)
+    {
+        typer.close();
+        return Err(error);
+    }
 
     let result = typer
         .type_text(text)

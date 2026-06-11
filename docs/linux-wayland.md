@@ -40,7 +40,15 @@ Install/run requirements:
 - `xdg-desktop-portal-kde` on KDE Plasma
 - a running Wayland session with portal remote-control support
 
-The first typing attempt may show a KDE remote-control/RemoteDesktop permission prompt. Approve it to allow Voxter to type into the active window.
+The first typing attempt may show a KDE remote-control/RemoteDesktop permission prompt. Approve it to allow Voxter to type into the active window. If the prompt offers an "Allow restoring on future sessions" option, enable it so the portal returns a restore token.
+
+Voxter stores the eitype restore token at:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/voxter/eitype-restore-token
+```
+
+`XDG_STATE_HOME` must be absolute when set. If it is unset, empty, or relative, Voxter uses `$HOME/.local/state`. Token persistence is strict: token read/write/path errors fail typing instead of silently falling back to a prompt-every-time flow.
 
 Keyboard layout can be influenced with eitype/XKB environment variables such as `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, `XKB_DEFAULT_MODEL`, and `XKB_DEFAULT_OPTIONS`.
 
