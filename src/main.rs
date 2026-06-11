@@ -225,6 +225,7 @@ struct AudioRecorder {
     tx: Arc<Mutex<Option<flume::Sender<Vec<i16>>>>>,
     result_rx: Arc<Mutex<Option<flume::Receiver<Vec<u8>>>>>,
     start_time: Arc<Mutex<Option<Instant>>>,
+    speech_seen: Arc<Mutex<bool>>,
 }
 
 impl Clone for AudioRecorder {
@@ -236,6 +237,7 @@ impl Clone for AudioRecorder {
             tx: Arc::clone(&self.tx),
             result_rx: Arc::clone(&self.result_rx),
             start_time: Arc::clone(&self.start_time),
+            speech_seen: Arc::clone(&self.speech_seen),
         }
     }
 }
@@ -249,6 +251,7 @@ impl AudioRecorder {
             tx: Arc::new(Mutex::new(None)),
             result_rx: Arc::new(Mutex::new(None)),
             start_time: Arc::new(Mutex::new(None)),
+            speech_seen: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -273,6 +276,7 @@ impl AudioRecorder {
         });
 
         *self.start_time.lock().unwrap() = Some(Instant::now());
+        *self.speech_seen.lock().unwrap() = false;
         *recording = true;
         Ok(())
     }
@@ -326,6 +330,42 @@ impl AudioManager {
 
         self.mode = mode;
         self.recorder.configure_from_device()?;
+
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or("No input device available")?;
+
+        let config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get input config: {}", e))?;
+
+        let tx_arc = Arc::clone(&self.recorder.tx);
+        let speech_viz = Arc::clone(&self.speech_viz);
+        let speech_seen = Arc::clone(&self.recorder.speech_seen);
+
+        const RMS_GAIN: f32 = 4.8;
+        const RMS_GAMMA: f32 = 0.52;
+        const ATTACK_ALPHA: f32 = 0.40;
+        const RELEASE_ALPHA: f32 = 0.16;
+
+        const VIS_ATTACK_ALPHA: f32 = 0.50;
+        const VIS_RELEASE_ALPHA: f32 = 0.22;
+        const GATE_SMOOTH_ALPHA: f32 = 0.14;
+        const VIS_NOISE_DEADZONE: f32 = 0.055;
+
+        const LIVE_VAD_SAMPLE_RATE: f32 = 16_000.0;
+        const LIVE_VAD_CHUNK_SIZE: usize = 512;
+        const VAD_SMOOTH_ALPHA: f32 = 0.24;
+        const VAD_ENTER_THRESHOLD: f32 = 0.42;
+        const VAD_EXIT_THRESHOLD: f32 = 0.30;
+
+        let mut live_vad = VoiceActivityDetector::builder()
+            .sample_rate(16_000)
+            .chunk_size(LIVE_VAD_CHUNK_SIZE)
+            .build()
+            .map_err(|e| format!("Live VAD init failed: {e}"))?;
+
         self.recorder.prepare_recording()?;
         self.speech_viz.set_active(true);
         self.speech_viz.set_level(0.0);
@@ -354,46 +394,6 @@ impl AudioManager {
             mode_str, self.recorder.sample_rate, self.recorder.channels
         );
 
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("No input device available")?;
-
-        let config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get input config: {}", e))?;
-
-        let tx_arc = Arc::clone(&self.recorder.tx);
-        let speech_viz = Arc::clone(&self.speech_viz);
-
-        const RMS_GAIN: f32 = 4.8;
-        const RMS_GAMMA: f32 = 0.52;
-        const ATTACK_ALPHA: f32 = 0.40;
-        const RELEASE_ALPHA: f32 = 0.16;
-
-        const VIS_ATTACK_ALPHA: f32 = 0.50;
-        const VIS_RELEASE_ALPHA: f32 = 0.22;
-        const GATE_SMOOTH_ALPHA: f32 = 0.14;
-        const VIS_NOISE_DEADZONE: f32 = 0.055;
-
-        const LIVE_VAD_SAMPLE_RATE: f32 = 16_000.0;
-        const LIVE_VAD_CHUNK_SIZE: usize = 512;
-        const VAD_SMOOTH_ALPHA: f32 = 0.24;
-        const VAD_ENTER_THRESHOLD: f32 = 0.42;
-        const VAD_EXIT_THRESHOLD: f32 = 0.30;
-
-        let mut live_vad = match VoiceActivityDetector::builder()
-            .sample_rate(16_000)
-            .chunk_size(LIVE_VAD_CHUNK_SIZE)
-            .build()
-        {
-            Ok(vad) => Some(vad),
-            Err(e) => {
-                eprintln!("Live VAD init failed (falling back to RMS-only): {e}");
-                None
-            }
-        };
-
         let input_sample_rate = config.sample_rate().0 as f32;
         let vad_resample_step = (input_sample_rate / LIVE_VAD_SAMPLE_RATE).max(0.01);
 
@@ -409,6 +409,7 @@ impl AudioManager {
                 let mut speech_conf = 0.0f32;
                 let mut in_speech = false;
                 let mut noise_floor = 0.0035f32;
+                let mut speech_marked = false;
                 device
                     .build_input_stream(
                         &config.into(),
@@ -454,46 +455,47 @@ impl AudioManager {
                                 };
                                 smoothed_level += alpha * (normalized - smoothed_level);
 
-                                let live_vad_enabled = live_vad.is_some();
-                                let mut vad_gate = 1.0f32;
-
-                                if let Some(vad) = live_vad.as_mut() {
-                                    let mut idx = resample_phase;
-                                    let chunk_len_f = chunk.len() as f32;
-                                    while idx < chunk_len_f {
-                                        let sample_idx = idx as usize;
-                                        if sample_idx >= chunk.len() {
-                                            break;
-                                        }
-                                        vad_buffer.push(chunk[sample_idx] as f32 / 32768.0);
-                                        idx += vad_resample_step;
+                                let mut idx = resample_phase;
+                                let chunk_len_f = chunk.len() as f32;
+                                while idx < chunk_len_f {
+                                    let sample_idx = idx as usize;
+                                    if sample_idx >= chunk.len() {
+                                        break;
                                     }
-                                    resample_phase = idx - chunk_len_f;
+                                    vad_buffer.push(chunk[sample_idx] as f32 / 32768.0);
+                                    idx += vad_resample_step;
+                                }
+                                resample_phase = idx - chunk_len_f;
 
-                                    while vad_buffer.len() >= LIVE_VAD_CHUNK_SIZE {
-                                        let frame: Vec<f32> =
-                                            vad_buffer.drain(..LIVE_VAD_CHUNK_SIZE).collect();
-                                        let raw = vad.predict(frame).clamp(0.0, 1.0);
-                                        speech_conf = ((1.0 - VAD_SMOOTH_ALPHA) * speech_conf)
-                                            + (VAD_SMOOTH_ALPHA * raw);
-                                    }
-
-                                    if in_speech {
-                                        if speech_conf < VAD_EXIT_THRESHOLD {
-                                            in_speech = false;
-                                        }
-                                    } else if speech_conf > VAD_ENTER_THRESHOLD {
-                                        in_speech = true;
-                                    }
-
-                                    vad_gate = if in_speech {
-                                        1.0
-                                    } else {
-                                        (speech_conf / VAD_ENTER_THRESHOLD).clamp(0.0, 1.0) * 0.35
-                                    };
+                                while vad_buffer.len() >= LIVE_VAD_CHUNK_SIZE {
+                                    let frame: Vec<f32> =
+                                        vad_buffer.drain(..LIVE_VAD_CHUNK_SIZE).collect();
+                                    let raw = live_vad.predict(frame).clamp(0.0, 1.0);
+                                    speech_conf = ((1.0 - VAD_SMOOTH_ALPHA) * speech_conf)
+                                        + (VAD_SMOOTH_ALPHA * raw);
                                 }
 
-                                let gated_target = if live_vad_enabled {
+                                if in_speech {
+                                    if speech_conf < VAD_EXIT_THRESHOLD {
+                                        in_speech = false;
+                                    }
+                                } else if speech_conf > VAD_ENTER_THRESHOLD {
+                                    in_speech = true;
+                                    if !speech_marked {
+                                        speech_marked = true;
+                                        if let Ok(mut seen) = speech_seen.lock() {
+                                            *seen = true;
+                                        }
+                                    }
+                                }
+
+                                let vad_gate = if in_speech {
+                                    1.0
+                                } else {
+                                    (speech_conf / VAD_ENTER_THRESHOLD).clamp(0.0, 1.0) * 0.35
+                                };
+
+                                let gated_target = {
                                     if in_speech {
                                         noise_floor = (noise_floor * 0.996) + (rms * 0.004);
                                     } else {
@@ -519,8 +521,6 @@ impl AudioManager {
                                     };
 
                                     (smoothed_level * blended_gate).clamp(0.0, 1.0)
-                                } else {
-                                    smoothed_level
                                 };
 
                                 let gated_target = if in_speech {
@@ -606,7 +606,7 @@ impl AudioManager {
                 return Ok(());
             }
 
-            // During VAD analysis keep overlay hidden; show spinner only if transcription starts.
+            // Keep overlay hidden while finalizing audio; show spinner only if transcription starts.
             sender.send(AppEvent::Overlay(OverlayState::Hidden));
 
             // Close the sender to signal worker end-of-stream
@@ -614,6 +614,7 @@ impl AudioManager {
                 guard.take();
             }
             let result_rx_arc = Arc::clone(&self.recorder.result_rx);
+            let speech_seen = Arc::clone(&self.recorder.speech_seen);
             let sender_clone = sender.clone();
             std::thread::spawn(move || {
                 println!("Finalizing audio stream...");
@@ -638,34 +639,18 @@ impl AudioManager {
                     }
                     // */
 
-                    // Check for speech activity using VAD
-                    match check_speech_activity(&opus_data) {
-                        Ok(has_speech) => {
-                            if has_speech {
-                                sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                                play_sound(OFF_SOUND_PATH);
-                                println!("Processing transcription...");
-                                if let Err(e) =
-                                    transcribe_audio_opus(opus_data, sender_clone.clone())
-                                {
-                                    eprintln!("Failed to transcribe audio: {}", e);
-                                }
-                                sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
-                            } else {
-                                println!("No speech detected, skipping transcription");
-                                sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
-                            }
+                    let has_speech = *speech_seen.lock().unwrap();
+                    if has_speech {
+                        sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
+                        play_sound(OFF_SOUND_PATH);
+                        println!("Processing transcription...");
+                        if let Err(e) = transcribe_audio_opus(opus_data, sender_clone.clone()) {
+                            eprintln!("Failed to transcribe audio: {}", e);
                         }
-                        Err(e) => {
-                            eprintln!("VAD analysis failed: {}, proceeding with transcription", e);
-                            sender_clone.send(AppEvent::Overlay(OverlayState::Transcribing));
-                            play_sound(OFF_SOUND_PATH);
-                            println!("Processing transcription...");
-                            if let Err(e) = transcribe_audio_opus(opus_data, sender_clone.clone()) {
-                                eprintln!("Failed to transcribe audio: {}", e);
-                            }
-                            sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
-                        }
+                        sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
+                    } else {
+                        println!("No speech detected by live VAD, skipping transcription");
+                        sender_clone.send(AppEvent::Overlay(OverlayState::Hidden));
                     }
                 } else {
                     eprintln!("No audio data produced");
@@ -687,90 +672,6 @@ impl AudioManager {
             Ok(false)
         }
     }
-}
-
-fn check_speech_activity(opus_data: &[u8]) -> Result<bool, String> {
-    let vad_start = Instant::now();
-
-    // Decode Opus to PCM for VAD analysis
-    let mut decoder = match opus::Decoder::new(48000, opus::Channels::Mono) {
-        Ok(d) => d,
-        Err(e) => return Err(format!("Failed to create Opus decoder: {}", e)),
-    };
-
-    // Parse OGG container to extract Opus packets
-    let mut ogg_reader = ogg::reading::PacketReader::new(std::io::Cursor::new(opus_data));
-    let mut all_samples = Vec::new();
-    let mut packet_count = 0;
-
-    while let Some(packet) = ogg_reader
-        .read_packet()
-        .map_err(|e| format!("OGG read error: {}", e))?
-    {
-        if packet_count == 0 {
-            // Skip first packet (Opus header)
-            packet_count += 1;
-            continue;
-        }
-
-        let mut pcm_buffer = vec![0i16; 960]; // 20ms at 48kHz
-        match decoder.decode(&packet.data, &mut pcm_buffer, false) {
-            Ok(samples) => {
-                all_samples.extend_from_slice(&pcm_buffer[..samples]);
-            }
-            Err(e) => {
-                eprintln!("Audio decode error: {}", e);
-                continue;
-            }
-        }
-        packet_count += 1;
-    }
-
-    if all_samples.is_empty() {
-        return Ok(false);
-    }
-
-    // Convert i16 to f32 and downsample from 48kHz to 16kHz (3:1 ratio)
-    let f32_samples: Vec<f32> = all_samples
-        .iter()
-        .step_by(3) // Simple downsampling by taking every 3rd sample
-        .map(|&s| s as f32 / 32768.0)
-        .collect();
-
-    // Initialize VAD
-    let mut vad = match VoiceActivityDetector::builder()
-        .sample_rate(16000)
-        .chunk_size(512usize)
-        .build()
-    {
-        Ok(v) => v,
-        Err(e) => return Err(format!("Failed to create VAD: {}", e)),
-    };
-
-    // Process audio in chunks suitable for VAD (512 samples for 48kHz)
-    const CHUNK_SIZE: usize = 512;
-    let mut speech_detected = false;
-
-    for chunk in f32_samples.chunks(CHUNK_SIZE) {
-        if chunk.len() == CHUNK_SIZE {
-            let chunk_owned: Vec<f32> = chunk.to_vec();
-            let is_speech = vad.predict(chunk_owned);
-            if is_speech > 0.5 {
-                // Threshold for speech detection
-                speech_detected = true;
-                break;
-            }
-        }
-    }
-
-    let vad_time = vad_start.elapsed();
-    println!(
-        "VAD analysis time: {:.3} ms, speech detected: {}",
-        vad_time.as_secs_f64() * 1000.0,
-        speech_detected
-    );
-
-    Ok(speech_detected)
 }
 
 fn _save_ogg_file(ogg_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
