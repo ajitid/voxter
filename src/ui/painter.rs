@@ -1,7 +1,9 @@
 use crate::SpeechVizState;
 use crate::ui::state::OverlayState;
+#[cfg(target_os = "macos")]
+use raqote::BlendMode;
 use raqote::{
-    BlendMode, Color, DrawOptions, DrawTarget, Gradient, GradientStop, LineCap, PathBuilder, Point,
+    Color, DrawOptions, DrawTarget, Gradient, GradientStop, LineCap, PathBuilder, Point,
     SolidSource, Source, Spread, StrokeStyle,
 };
 use std::sync::Arc;
@@ -109,6 +111,7 @@ impl OverlayPainter {
         )
     }
 
+    #[cfg(target_os = "macos")]
     fn draw_latch_lock_icon(&mut self, center: Point) {
         let lock_pink = SolidSource::from_unpremultiplied_argb(235, 0xFF, 0x5F, 0xA2);
 
@@ -252,7 +255,16 @@ impl OverlayPainter {
         let stroke_width = 3.8;
 
         match state {
-            OverlayState::Recording | OverlayState::RecordingLatch => {
+            OverlayState::Recording => {
+                let sagitta = sagitta_min + (display_energy * sagitta_range);
+                let arc_points =
+                    Self::arc_points_from_sagitta(cx, y_base, half_chord, sagitta, sample_count);
+                let arc_source =
+                    Self::arc_gradient_source(cx - half_chord, cx + half_chord, y_base, 1.0);
+                self.draw_polyline_source(&arc_points, stroke_width, &arc_source);
+            }
+            #[cfg(target_os = "macos")]
+            OverlayState::RecordingLatch => {
                 let sagitta = sagitta_min + (display_energy * sagitta_range);
                 let arc_points =
                     Self::arc_points_from_sagitta(cx, y_base, half_chord, sagitta, sample_count);
@@ -260,15 +272,13 @@ impl OverlayPainter {
                     Self::arc_gradient_source(cx - half_chord, cx + half_chord, y_base, 1.0);
                 self.draw_polyline_source(&arc_points, stroke_width, &arc_source);
 
-                if matches!(state, OverlayState::RecordingLatch) {
-                    const LOCK_ICON_GAP_FROM_ARC_END: f32 = 20.0;
-                    const LOCK_ICON_MIN_MARGIN_RIGHT: f32 = 22.0;
-                    const LOCK_ICON_BASELINE_OFFSET: f32 = 4.5;
-                    let lock_x = (cx + half_chord + LOCK_ICON_GAP_FROM_ARC_END)
-                        .min(width - LOCK_ICON_MIN_MARGIN_RIGHT);
-                    let lock_center = Point::new(lock_x, y_base - LOCK_ICON_BASELINE_OFFSET);
-                    self.draw_latch_lock_icon(lock_center);
-                }
+                const LOCK_ICON_GAP_FROM_ARC_END: f32 = 20.0;
+                const LOCK_ICON_MIN_MARGIN_RIGHT: f32 = 22.0;
+                const LOCK_ICON_BASELINE_OFFSET: f32 = 4.5;
+                let lock_x = (cx + half_chord + LOCK_ICON_GAP_FROM_ARC_END)
+                    .min(width - LOCK_ICON_MIN_MARGIN_RIGHT);
+                let lock_center = Point::new(lock_x, y_base - LOCK_ICON_BASELINE_OFFSET);
+                self.draw_latch_lock_icon(lock_center);
             }
             OverlayState::Transcribing => {
                 self.draw_sine_squares(cx, y_base, state_elapsed);

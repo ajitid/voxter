@@ -2,6 +2,7 @@
 pub enum OverlayState {
     Hidden,
     Recording,
+    #[cfg(target_os = "macos")]
     RecordingLatch,
     Transcribing,
 }

@@ -11,33 +11,35 @@ fn linux_main() -> Result<(), String> {
     use rdev::{EventType, Key};
     use std::io::{self, Write};
 
-    eprintln!("voxter-hotkey-helper: listening for Left Control + Alt + Windows + H hotkey events");
+    eprintln!(
+        "voxter-hotkey-helper: listening for Left Control + Left Alt + Left Windows + J hotkey events"
+    );
 
     let mut left_control_down = false;
-    let mut alt_down = false;
+    let mut left_alt_down = false;
     let mut left_windows_down = false;
-    let mut h_down = false;
+    let mut j_down = false;
     let mut hotkey_active = false;
 
     rdev::listen(move |event| {
         match event.event_type {
             EventType::KeyPress(Key::ControlLeft) => left_control_down = true,
             EventType::KeyRelease(Key::ControlLeft) => left_control_down = false,
-            EventType::KeyPress(Key::Alt) => alt_down = true,
-            EventType::KeyRelease(Key::Alt) => alt_down = false,
+            // rdev reports the left Alt key as Key::Alt; right Alt is Key::AltGr.
+            EventType::KeyPress(Key::Alt) => left_alt_down = true,
+            EventType::KeyRelease(Key::Alt) => left_alt_down = false,
             EventType::KeyPress(Key::MetaLeft) => left_windows_down = true,
             EventType::KeyRelease(Key::MetaLeft) => left_windows_down = false,
-            EventType::KeyPress(Key::KeyH) => h_down = true,
-            EventType::KeyRelease(Key::KeyH) => h_down = false,
-            EventType::KeyPress(Key::Space) => emit_event("space_press"),
+            EventType::KeyPress(Key::KeyJ) => j_down = true,
+            EventType::KeyRelease(Key::KeyJ) => j_down = false,
             _ => {}
         }
 
-        let chord_down = left_control_down && alt_down && left_windows_down && h_down;
-        if chord_down && !hotkey_active {
+        let record_chord_down = left_control_down && left_alt_down && left_windows_down && j_down;
+        if record_chord_down && !hotkey_active {
             hotkey_active = true;
             emit_event("hotkey_press");
-        } else if !chord_down && hotkey_active {
+        } else if !record_chord_down && hotkey_active {
             hotkey_active = false;
             emit_event("hotkey_release");
         }

@@ -77,6 +77,7 @@ fn play_sound(name: &'static str, bytes: &'static [u8]) {
 #[derive(Clone, Copy, PartialEq)]
 enum RecordingMode {
     Hold,
+    #[cfg(target_os = "macos")]
     Latch,
 }
 
@@ -84,7 +85,10 @@ enum RecordingMode {
 enum ControlMsg {
     StopHold,
     SinglePress,
+    #[cfg(target_os = "macos")]
     SwitchToLatch,
+    #[cfg(target_os = "macos")]
+    TypeLastTranscript,
     Quit,
 }
 
@@ -303,6 +307,7 @@ impl AudioManager {
 
         let mode_str = match mode {
             RecordingMode::Hold => "HOLD",
+            #[cfg(target_os = "macos")]
             RecordingMode::Latch => "LATCH",
         };
         println!(
@@ -633,6 +638,7 @@ impl AudioManager {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn switch_to_latch_mode(&mut self) -> Result<bool, String> {
         if self.recorder.is_recording() && self.mode == RecordingMode::Hold {
             self.mode = RecordingMode::Latch;
@@ -1438,6 +1444,11 @@ impl App {
                 Ok(false) => {}
                 Err(e) => eprintln!("Failed to switch to latch mode: {}", e),
             },
+            ControlMsg::TypeLastTranscript => match type_last_transcript() {
+                Ok(true) => println!("Typed last transcript"),
+                Ok(false) => println!("No last transcript available to type"),
+                Err(e) => eprintln!("Failed to type transcript: {e}"),
+            },
             ControlMsg::Quit => {
                 if self.audio_manager.recorder.is_recording()
                     && let Err(e) = self.audio_manager.stop_recording(self.sender.clone())
@@ -1634,7 +1645,6 @@ fn spawn_hotkey_listener(sender: AppSender) {
             let control = match event.event.as_str() {
                 "hotkey_press" => ControlMsg::SinglePress,
                 "hotkey_release" => ControlMsg::StopHold,
-                "space_press" => ControlMsg::SwitchToLatch,
                 other => {
                     eprintln!("Ignoring unknown Linux hotkey helper event: {other}");
                     continue;
@@ -1679,13 +1689,7 @@ fn handle_linux_event(
                 }
             }
             ControlMsg::SinglePress => {
-                if audio_manager.recorder.is_recording()
-                    && audio_manager.mode == RecordingMode::Latch
-                {
-                    if let Err(e) = audio_manager.stop_recording(sender.clone()) {
-                        eprintln!("Failed to stop recording: {e}");
-                    }
-                } else if !audio_manager.recorder.is_recording()
+                if !audio_manager.recorder.is_recording()
                     && let Err(e) = audio_manager.start_recording(RecordingMode::Hold)
                 {
                     eprintln!("Failed to start hold recording: {e}");
@@ -1693,11 +1697,6 @@ fn handle_linux_event(
                     sender.send(AppEvent::Overlay(OverlayState::Recording));
                 }
             }
-            ControlMsg::SwitchToLatch => match audio_manager.switch_to_latch_mode() {
-                Ok(true) => sender.send(AppEvent::Overlay(OverlayState::RecordingLatch)),
-                Ok(false) => {}
-                Err(e) => eprintln!("Failed to switch to latch mode: {e}"),
-            },
             ControlMsg::Quit => {
                 if audio_manager.recorder.is_recording()
                     && let Err(e) = audio_manager.stop_recording(sender.clone())
@@ -1816,9 +1815,9 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mistral Voxtral Speech-to-Text");
-    println!("Recording modes:");
     #[cfg(target_os = "macos")]
     {
+        println!("Recording modes:");
         println!("  HOLD: Hold Right Option (⌥), release to transcribe");
         println!(
             "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Right Option again to stop"
@@ -1826,10 +1825,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(target_os = "linux")]
     {
-        println!("  HOLD: Hold Left Control + Alt + Windows + H, release to transcribe");
-        println!(
-            "  LATCH: Press Space while in HOLD mode to switch to LATCH, then press Left Control + Alt + Windows + H again to stop"
-        );
+        println!("Linux shortcuts: LACW = Left Control + Left Alt + Left Windows");
+        println!("Recording modes:");
+        println!("  HOLD: Hold LACW + J, release to transcribe");
     }
     #[cfg(target_os = "macos")]
     {

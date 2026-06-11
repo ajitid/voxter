@@ -1,6 +1,6 @@
 # Linux Wayland hotkey helper
 
-On Linux, Voxter uses a small privileged helper for the global Left Control + Alt + Windows + H hotkey. Wayland does not generally allow regular desktop apps to read global keyboard events, so the main app launches the installed helper through `pkexec`.
+On Linux, Voxter uses a small privileged helper for the global Left Control + Left Alt + Left Windows + J hotkey. Wayland does not generally allow regular desktop apps to read global keyboard events, so the main app launches the installed helper through `pkexec`.
 
 Install it with:
 
@@ -25,7 +25,6 @@ The helper is intentionally tiny. It reads raw input events and writes only thes
 ```json
 {"event":"hotkey_press"}
 {"event":"hotkey_release"}
-{"event":"space_press"}
 ```
 
 It does not send audio, transcripts, environment variables, or other app state.
