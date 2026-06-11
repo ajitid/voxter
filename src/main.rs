@@ -763,8 +763,8 @@ fn transcribe_audio_opus(
     dotenvy::dotenv().ok();
 
     let api_key =
-        env::var("MISTRAL_API_KEY").expect("MISTRAL_API_KEY environment variable must be set");
-    let context_bias = env::var("CONTEXT_BIAS").ok();
+        env::var("VOXTER_API_KEY").expect("VOXTER_API_KEY environment variable must be set");
+    let context_bias = env::var("VOXTER_CONTEXT_BIAS").ok();
 
     let client = reqwest::blocking::Client::new();
 
