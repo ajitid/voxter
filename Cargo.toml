@@ -40,6 +40,7 @@ tray-icon = "0.22.0"
 eitype = "0.2.1"
 ksni = { version = "0.3.5", features = ["blocking"] }
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2", features = ["wayland"] }
+secret-service = { version = "5.1.0", features = ["rt-async-io-crypto-rust"] }
 smithay-client-toolkit = "0.20.0"
 wayland-client = "0.31.1"
 zbus = { version = "5.16.0", default-features = false, features = ["url"] }

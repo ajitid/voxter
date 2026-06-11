@@ -702,15 +702,142 @@ fn parse_context_bias(context_bias: &str) -> Vec<String> {
     terms
 }
 
+#[cfg(target_os = "linux")]
+fn voxter_config_home() -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+
+    if let Some(value) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+    }
+
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "Unable to resolve Voxter config path: HOME is unset".to_string())?;
+
+    if !home.is_absolute() {
+        return Err(format!(
+            "Unable to resolve Voxter config path: HOME is not absolute: {}",
+            home.display()
+        ));
+    }
+
+    Ok(home.join(".config"))
+}
+
+#[cfg(target_os = "linux")]
+fn read_trimmed_file(path: std::path::PathBuf) -> Result<Option<String>, String> {
+    use std::fs;
+    use std::io::ErrorKind;
+
+    match fs::read_to_string(&path) {
+        Ok(value) => {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value))
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Failed to read {}: {error}", path.display())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn load_api_key_from_secret_service() -> Result<Option<String>, String> {
+    use secret_service::{EncryptionType, blocking::SecretService};
+    use std::collections::HashMap;
+
+    let service = SecretService::connect(EncryptionType::Dh)
+        .map_err(|error| format!("Failed to connect to Secret Service: {error}"))?;
+    let items = service
+        .search_items(HashMap::from([
+            ("application", "voxter"),
+            ("key", "api-key"),
+        ]))
+        .map_err(|error| format!("Failed to search Secret Service for Voxter API key: {error}"))?;
+
+    let item = if let Some(item) = items.unlocked.first() {
+        item
+    } else if let Some(item) = items.locked.first() {
+        item.unlock()
+            .map_err(|error| format!("Failed to unlock Voxter API key: {error}"))?;
+        item
+    } else {
+        return Ok(None);
+    };
+
+    let secret = item
+        .get_secret()
+        .map_err(|error| format!("Failed to read Voxter API key from Secret Service: {error}"))?;
+    let value = String::from_utf8(secret)
+        .map_err(|error| format!("Voxter API key in Secret Service is not UTF-8: {error}"))?
+        .trim()
+        .to_string();
+
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn load_api_key() -> Result<String, String> {
+    if let Ok(value) = env::var("VOXTER_API_KEY") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+
+    load_api_key_from_secret_service()?.ok_or_else(|| {
+        "VOXTER_API_KEY is unset and no Voxter API key was found in Secret Service".to_string()
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_api_key() -> Result<String, String> {
+    env::var("VOXTER_API_KEY")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "VOXTER_API_KEY environment variable must be set".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn load_context_bias() -> Result<Option<String>, String> {
+    if let Ok(value) = env::var("VOXTER_CONTEXT_BIAS") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+
+    let path = voxter_config_home()?.join("voxter").join("context-bias");
+    read_trimmed_file(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_context_bias() -> Result<Option<String>, String> {
+    Ok(env::var("VOXTER_CONTEXT_BIAS")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty()))
+}
+
 fn transcribe_audio_opus(
     opus_data: Vec<u8>,
     sender: AppSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let api_key =
-        env::var("VOXTER_API_KEY").expect("VOXTER_API_KEY environment variable must be set");
-    let context_bias = env::var("VOXTER_CONTEXT_BIAS").ok();
+    let api_key = load_api_key().map_err(std::io::Error::other)?;
+    let context_bias = load_context_bias().map_err(std::io::Error::other)?;
 
     let client = reqwest::blocking::Client::new();
 

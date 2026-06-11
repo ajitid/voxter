@@ -9,13 +9,14 @@ VOXTER_SHARE_DIR="/usr/local/share/voxter"
 ICON_PATH="/usr/share/icons/hicolor/scalable/status/voxter-symbolic.svg"
 POLICY_PATH="/usr/share/polkit-1/actions/com.ajitid.voxter.hotkey-helper.policy"
 RULES_PATH="/usr/share/polkit-1/rules.d/50-voxter-hotkey-helper.rules"
+SERVICE_PATH="/etc/systemd/user/voxter.service"
 
 ACTION="install"
-PARTS="helper,app-binary,app-assets"
+PARTS="helper,app-binary,app-assets,app-service"
 
 usage() {
   cat <<'MSG'
-Usage: scripts/install-linux.sh [--install|--uninstall] [--parts=helper,app-binary,app-assets]
+Usage: scripts/install-linux.sh [--install|--uninstall] [--parts=helper,app-binary,app-assets,app-service]
 
 Options:
   --install       Build and install selected Linux parts (default)
@@ -27,6 +28,7 @@ Parts:
   helper          voxter-hotkey-helper binary plus polkit policy/rules
   app-binary      main voxter binary
   app-assets      runtime sounds and hicolor voxter-symbolic tray icon
+  app-service     systemd user service file for starting voxter in the background
 MSG
 }
 
@@ -47,6 +49,7 @@ normalize_parts() {
   local seen_helper=0
   local seen_app_binary=0
   local seen_app_assets=0
+  local seen_app_service=0
 
   if [[ -z "$input" ]]; then
     echo "--parts must not be empty" >&2
@@ -72,6 +75,12 @@ normalize_parts() {
         if [[ $seen_app_assets -eq 0 ]]; then
           normalized+=("app-assets")
           seen_app_assets=1
+        fi
+        ;;
+      app-service)
+        if [[ $seen_app_service -eq 0 ]]; then
+          normalized+=("app-service")
+          seen_app_service=1
         fi
         ;;
       "")
@@ -131,6 +140,65 @@ build_selected_binaries() {
   fi
 }
 
+xdg_config_home() {
+  if [[ -n "${XDG_CONFIG_HOME:-}" && "$XDG_CONFIG_HOME" = /* ]]; then
+    printf '%s\n' "$XDG_CONFIG_HOME"
+  else
+    printf '%s\n' "$HOME/.config"
+  fi
+}
+
+prompt_and_store_user_settings() {
+  local config_dir context_bias_path existing_api_key api_key context_bias prompt
+
+  if [[ ! -t 0 ]]; then
+    echo "Installing app-service requires an interactive terminal to enter VOXTER_API_KEY." >&2
+    exit 1
+  fi
+
+  if ! command -v secret-tool >/dev/null 2>&1; then
+    echo "Installing app-service requires secret-tool for Secret Service key storage." >&2
+    echo "Install libsecret's secret-tool package for your distribution and rerun this script." >&2
+    exit 1
+  fi
+
+  config_dir="$(xdg_config_home)/voxter"
+  context_bias_path="$config_dir/context-bias"
+
+  install -d -m 700 "$config_dir"
+
+  if existing_api_key="$(secret-tool lookup application voxter key api-key 2>/dev/null)" && [[ -n "$existing_api_key" ]]; then
+    prompt="Enter VOXTER_API_KEY (leave blank to keep existing Secret Service item): "
+  else
+    prompt="Enter VOXTER_API_KEY: "
+  fi
+
+  while true; do
+    read -r -s -p "$prompt" api_key
+    printf '\n'
+    if [[ -n "$api_key" ]]; then
+      printf '%s' "$api_key" | secret-tool store \
+        --label="Voxter API key" \
+        application voxter \
+        key api-key
+      break
+    fi
+    if [[ -n "${existing_api_key:-}" ]]; then
+      break
+    fi
+    echo "VOXTER_API_KEY is required for the systemd user service."
+  done
+
+  read -r -p "Enter VOXTER_CONTEXT_BIAS (optional, leave blank to skip/keep existing): " context_bias
+  if [[ -n "$context_bias" ]]; then
+    printf '%s\n' "$context_bias" >"$context_bias_path"
+    chmod 600 "$context_bias_path"
+  fi
+
+  echo "Stored Voxter API key in Secret Service."
+  echo "Optional context bias path: $context_bias_path"
+}
+
 install_selected() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -158,12 +226,34 @@ install_selected() {
     refresh_icon_caches || true
   fi
 
+  if has_part app-service; then
+    sudo install -Dm644 packaging/systemd/voxter.service "$SERVICE_PATH"
+    systemctl --user daemon-reload || true
+    prompt_and_store_user_settings
+    systemctl --user enable --now voxter.service
+  fi
+
   echo "Installed selected Voxter Linux parts: $PARTS"
   if has_part helper; then
     cat <<MSG
 
 Active local users in the 'wheel' group can run the helper without a password.
 Other users fall back to auth_admin_keep from the policy file.
+MSG
+  fi
+
+  if has_part app-service; then
+    cat <<'MSG'
+
+The systemd user service has been enabled and started:
+  systemctl --user enable --now voxter.service
+
+Voxter will start automatically on login.
+
+Voxter will read its API key from Secret Service.
+
+Optional context bias is read from:
+  ~/.config/voxter/context-bias
 MSG
   fi
 }
@@ -181,6 +271,12 @@ uninstall_selected() {
     sudo rm -f "$ON_SOUND_PATH" "$OFF_SOUND_PATH" "$ICON_PATH"
     sudo rmdir "$VOXTER_SHARE_DIR/assets" "$VOXTER_SHARE_DIR" 2>/dev/null || true
     refresh_icon_caches || true
+  fi
+
+  if has_part app-service; then
+    systemctl --user disable --now voxter.service || true
+    sudo rm -f "$SERVICE_PATH"
+    systemctl --user daemon-reload || true
   fi
 
   echo "Removed selected Voxter Linux parts: $PARTS"

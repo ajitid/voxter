@@ -1,0 +1,15 @@
+[Unit]
+Description=Voxter voice transcription
+Documentation=https://github.com/ajitid/voxter
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/voxter
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
