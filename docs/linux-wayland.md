@@ -30,6 +30,20 @@ The helper is intentionally tiny. It reads raw input events and writes only thes
 
 It does not send audio, transcripts, environment variables, or other app state.
 
+## Typing on Wayland
+
+On Linux, Voxter types transcripts through the `eitype` Rust library, which uses libei via the XDG RemoteDesktop portal. This is intended to work on KDE/Wayland where Enigo/wtype-style virtual-keyboard approaches can fail.
+
+Install/run requirements:
+
+- `xdg-desktop-portal`
+- `xdg-desktop-portal-kde` on KDE Plasma
+- a running Wayland session with portal remote-control support
+
+The first typing attempt may show a KDE remote-control/RemoteDesktop permission prompt. Approve it to allow Voxter to type into the active window.
+
+Keyboard layout can be influenced with eitype/XKB environment variables such as `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, `XKB_DEFAULT_MODEL`, and `XKB_DEFAULT_OPTIONS`.
+
 ## Polkit authorization behavior
 
 The installed rules file allows active local users in the `wheel` group to run the helper without a password:

@@ -866,14 +866,35 @@ fn type_transcript(text: &str) {
     });
 }
 
+#[cfg(target_os = "macos")]
 fn try_type(text: &str) -> Result<(), String> {
     use enigo::{Enigo, Keyboard, Settings};
+
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init error: {e}"))?;
     enigo
         .text(text)
         .map_err(|e| format!("Enigo text error: {e}"))?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_type(text: &str) -> Result<(), String> {
+    use eitype::{EiType, EiTypeConfig};
+
+    let mut typer = EiType::connect_portal(EiTypeConfig::from_env()).map_err(|e| {
+        format!(
+            "eitype portal connection error: {e}. \
+             Ensure xdg-desktop-portal and xdg-desktop-portal-kde are installed/running, \
+             and approve the remote-control prompt if shown."
+        )
+    })?;
+
+    let result = typer
+        .type_text(text)
+        .map_err(|e| format!("eitype text error: {e}"));
+    typer.close();
+    result
 }
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
