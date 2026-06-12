@@ -5,7 +5,7 @@ On Linux/KDE, Voxter requires a working StatusNotifierItem system tray (for exam
 - `Type last transcript`
 - `Quit`
 
-Startup is strict: if Voxter cannot find installed Linux assets or cannot register the StatusNotifierItem tray, it exits instead of continuing without a tray/icon/sounds.
+Startup is strict for installed assets and the StatusNotifierItem tray. The recording overlay is best-effort: if the compositor does not provide the needed layer-shell protocol, Voxter continues without overlay UI.
 
 ## Linux install
 
@@ -36,6 +36,10 @@ This installs:
 - `/usr/share/polkit-1/rules.d/50-voxter-hotkey-helper.rules`
 
 Linux startup is strict. If any required runtime asset is missing, Voxter exits with an error; rerun `scripts/install-linux.sh` to reinstall them.
+
+## Overlay availability
+
+Voxter tries to show its recording overlay through the Wayland `zwlr_layer_shell_v1` protocol. Some compositors, including GNOME/Mutter, do not provide this protocol. If overlay initialization fails, Voxter continues without overlay UI; recording sounds and the tray menu still work.
 
 The hotkey helper is intentionally tiny. It reads raw input events and writes only these JSON-lines events to stdout:
 

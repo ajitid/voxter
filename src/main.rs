@@ -1765,7 +1765,7 @@ fn handle_linux_event(
     event: AppEvent,
     sender: &AppSender,
     audio_manager: &mut AudioManager,
-    overlay: &mut LinuxOverlayController,
+    overlay: Option<&mut LinuxOverlayController>,
     tray: &LinuxStatusTray,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match event {
@@ -1802,7 +1802,9 @@ fn handle_linux_event(
                     eprintln!("Failed to stop recording: {e}");
                 }
                 shutdown_linux_typing_worker();
-                overlay.update_state(OverlayState::Hidden)?;
+                if let Some(overlay) = overlay {
+                    overlay.update_state(OverlayState::Hidden)?;
+                }
                 tray.shutdown();
                 return Ok(false);
             }
@@ -1811,7 +1813,9 @@ fn handle_linux_event(
             if state == OverlayState::Hidden {
                 audio_manager.speech_viz.reset();
             }
-            overlay.update_state(state)?;
+            if let Some(overlay) = overlay {
+                overlay.update_state(state)?;
+            }
         }
         AppEvent::TranscriptUpdated => {
             tray.refresh_type_item(last_transcription_text().is_some());
@@ -1825,14 +1829,17 @@ fn linux_event_loop(
     rx: std::sync::mpsc::Receiver<AppEvent>,
     sender: AppSender,
     audio_manager: &mut AudioManager,
-    overlay: &mut LinuxOverlayController,
+    overlay: Option<&mut LinuxOverlayController>,
     tray: &LinuxStatusTray,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut overlay = overlay;
     let mut running = true;
     while running {
-        overlay.dispatch_pending()?;
+        if let Some(overlay) = overlay.as_deref_mut() {
+            overlay.dispatch_pending()?;
+        }
 
-        let timeout = if overlay.is_visible() {
+        let timeout = if overlay.as_ref().is_some_and(|overlay| overlay.is_visible()) {
             std::time::Duration::from_millis(16)
         } else {
             std::time::Duration::from_millis(250)
@@ -1840,12 +1847,23 @@ fn linux_event_loop(
 
         match rx.recv_timeout(timeout) {
             Ok(event) => {
-                running = handle_linux_event(event, &sender, audio_manager, overlay, tray)?;
+                running = handle_linux_event(
+                    event,
+                    &sender,
+                    audio_manager,
+                    overlay.as_deref_mut(),
+                    tray,
+                )?;
                 while running {
                     match rx.try_recv() {
                         Ok(event) => {
-                            running =
-                                handle_linux_event(event, &sender, audio_manager, overlay, tray)?
+                            running = handle_linux_event(
+                                event,
+                                &sender,
+                                audio_manager,
+                                overlay.as_deref_mut(),
+                                tray,
+                            )?
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -1856,7 +1874,9 @@ fn linux_event_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if overlay.is_visible() {
+        if let Some(overlay) = overlay.as_deref_mut()
+            && overlay.is_visible()
+        {
             overlay.redraw_if_visible()?;
         }
     }
@@ -1916,8 +1936,16 @@ fn run_app() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to start Linux status tray: {e}"))?;
 
     let mut audio_manager = AudioManager::new();
-    let mut overlay = LinuxOverlayController::new(Arc::clone(&audio_manager.speech_viz))?;
-    linux_event_loop(rx, sender, &mut audio_manager, &mut overlay, &tray)
+    let mut overlay = match LinuxOverlayController::new(Arc::clone(&audio_manager.speech_viz)) {
+        Ok(overlay) => Some(overlay),
+        Err(error) => {
+            eprintln!(
+                "Linux overlay is unavailable; continuing without overlay UI. Reason: {error}"
+            );
+            None
+        }
+    };
+    linux_event_loop(rx, sender, &mut audio_manager, overlay.as_mut(), &tray)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
