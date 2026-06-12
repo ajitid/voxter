@@ -1,6 +1,6 @@
 pub mod painter;
 pub mod state;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod tray_art;
 
 #[cfg(target_os = "macos")]

@@ -1,7 +1,7 @@
 use crate::{AppEvent, AppSender, ControlMsg};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
-use ksni::{Category, MenuItem, Status, ToolTip, Tray};
+use ksni::{Category, Icon, MenuItem, Status, ToolTip, Tray};
 
 pub struct LinuxStatusTray {
     handle: Handle<VoxterLinuxTray>,
@@ -12,6 +12,7 @@ impl LinuxStatusTray {
         let tray = VoxterLinuxTray {
             sender,
             has_last_transcript,
+            use_light_pixmap: is_gnome_session(),
         };
         let handle = tray
             .spawn()
@@ -33,6 +34,30 @@ impl LinuxStatusTray {
 struct VoxterLinuxTray {
     sender: AppSender,
     has_last_transcript: bool,
+    use_light_pixmap: bool,
+}
+
+fn is_gnome_session() -> bool {
+    ["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .any(|value| value.to_ascii_lowercase().contains("gnome"))
+}
+
+fn build_light_status_icon_pixmap() -> Icon {
+    let icon = crate::ui::tray_art::build_status_icon_rgba();
+    let mut data = Vec::with_capacity(icon.rgba.len());
+
+    for pixel in icon.rgba.chunks_exact(4) {
+        let alpha = pixel[3];
+        data.extend_from_slice(&[alpha, 255, 255, 255]);
+    }
+
+    Icon {
+        width: icon.width as i32,
+        height: icon.height as i32,
+        data,
+    }
 }
 
 impl Tray for VoxterLinuxTray {
@@ -55,7 +80,19 @@ impl Tray for VoxterLinuxTray {
     }
 
     fn icon_name(&self) -> String {
-        "voxter-symbolic".to_string()
+        if self.use_light_pixmap {
+            String::new()
+        } else {
+            "voxter-symbolic".to_string()
+        }
+    }
+
+    fn icon_pixmap(&self) -> Vec<Icon> {
+        if self.use_light_pixmap {
+            vec![build_light_status_icon_pixmap()]
+        } else {
+            Vec::new()
+        }
     }
 
     fn tool_tip(&self) -> ToolTip {
