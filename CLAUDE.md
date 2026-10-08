@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-A Rust desktop application that records audio via global hotkeys and transcribes it using Groq's Whisper Large V3 Turbo API. Transcriptions are automatically typed into the active window.
+A Rust desktop application that records audio via global hotkeys and transcribes it using Mistral's Voxtral Mini Transcribe API. Transcriptions are automatically typed into the active window.
 
 ## Development Commands
 - `cargo build` - Build the project
@@ -35,7 +35,7 @@ A Rust desktop application that records audio via global hotkeys and transcribes
 1. `cpal` captures audio (f32 samples at device sample rate)
 2. Audio callback downmixes to mono, converts f32→i16, sends via `flume` channel
 3. Opus worker thread encodes 20ms frames (24kbps) into Ogg container
-4. On stop: finalize Ogg stream, run VAD check, send to Groq Whisper API if speech detected
+4. On stop: finalize Ogg stream, run VAD check, send to Mistral's Voxtral transcription API if speech detected
 5. Transcription auto-typed via `enigo`, audio feedback via `rodio` (assets/on.mp3, assets/off.mp3)
 
 ### Threading Model
