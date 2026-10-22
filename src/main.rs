@@ -876,7 +876,7 @@ fn transcribe_audio_opus(
     let client = reqwest::blocking::Client::new();
 
     let mut form = multipart::Form::new()
-        .text("model", "voxtral-mini-transcribe-3-0")
+        .text("model", "voxtral-small-transcribe-3-0")
         .text("language", "en")
         .part(
             "file",
