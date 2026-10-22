@@ -698,14 +698,26 @@ fn parse_context_bias(context_bias: &str) -> Vec<String> {
         if term.is_empty() {
             continue;
         }
-        // Mistral requires terms without spaces/commas - replace spaces with underscores
-        let normalized = term.replace(' ', "_");
-        if !terms.contains(&normalized) {
-            terms.push(normalized);
+        // Voxtral 3 accepts multi-word keyphrases with spaces.
+        if !terms.iter().any(|existing| existing == term) {
+            terms.push(term.to_string());
         }
     }
 
     terms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_context_bias;
+
+    #[test]
+    fn context_bias_preserves_phrases_and_removes_empty_or_duplicate_terms() {
+        assert_eq!(
+            parse_context_bias("  Mistral AI, ,Voxtral, Mistral AI, Alder Creek Design,"),
+            vec!["Mistral AI", "Voxtral", "Alder Creek Design"]
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -864,7 +876,7 @@ fn transcribe_audio_opus(
     let client = reqwest::blocking::Client::new();
 
     let mut form = multipart::Form::new()
-        .text("model", "voxtral-mini-latest")
+        .text("model", "voxtral-mini-transcribe-3-0")
         .text("language", "en")
         .part(
             "file",
